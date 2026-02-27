@@ -6,7 +6,6 @@ Minimal, readable baseline focused on:
 ## Project layout
 - `configs/`: base + classification config
 - `src/nodulocc/`: core code (CLI, data, models, engine, metrics, tracking, HPO)
-- `legacy/starter-baseline.py`: archived initial single-file baseline
 - `NARVAL_SLURM_TUTORIAL.md`: step-by-step HPC/Slurm guide for Narval (Calcul Quebec)
 
 ## Setup

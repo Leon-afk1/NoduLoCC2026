@@ -1,152 +1,161 @@
-# Tutoriel Narval (Calcul Québec) avec Slurm
+# Narval (Calcul Québec) Tutorial with Slurm
 
-Ce guide explique comment installer ce projet et lancer les entraînements sur Narval.
+This guide explains how to install this project and run training jobs on
+Narval.
 
-## 1) Pré-requis
+## 1) Prerequisites
 
-- Un compte Alliance/Calcul Québec actif.
-- Un compte/projet Slurm (`--account=...`, ex: `def-monpi`).
-- Connexion SSH vers Narval.
+-   An active Alliance/Calcul Québec account.
+-   A Slurm account/project (`--account=...`, e.g., `def-monpi`).
+-   SSH access to Narval.
 
-## 2) Où mettre les fichiers
+## 2) Where to place the files
 
-Recommandation pratique:
-- code + checkpoints temporaires: `$SCRATCH`
-- résultats finaux à conserver: `$PROJECT` (ou autre stockage persistant)
-- dataset: idéalement dans `$SCRATCH` (I/O plus rapide), ou en lecture depuis `$PROJECT`
+Practical recommendation: 
+- code + temporary checkpoints: `$SCRATCH`
+- final results to keep: `$PROJECT` (or other persistent storage)
+- dataset: for better I/O performance (especially with many small files),
+you can temporarily copy the dataset to `$SLURM_TMPDIR`, which
+corresponds to the local storage of the compute node allocated to the
+job; its content is automatically deleted at the end of the job.
 
-Exemple:
-```bash
-mkdir -p $SCRATCH/nodulocc
-cd $SCRATCH/nodulocc
+Note: The `$SCRATCH` directory is subject to an automatic purge policy
+(inactive files are deleted after some time); it must not be used for
+long-term storage. Important outputs should be copied to `$PROJECT` or
+another persistent storage location.
+
+Example:
+
+``` bash
+cd $SCRATCH
+git clone https://github.com/Leon-afk1/NoduLoCC2026.git
+cd NoduLoCC2026
+git checkout leonard
 ```
 
-Si ton dataset est à côté du repo localement, copie-le aussi sur Narval, par exemple:
-```bash
-rsync -av ~/AI/nodulocc_dataset $SCRATCH/
+Copy the dataset to Narval:
+
+``` bash
+rsync -avz local_path user@narval.calculquebec.ca:~/scratch/
 ```
 
-## 3) Préparer l’environnement Python (sur login node)
+Create a tar archive of the dataset to simplify staging inside the Slurm
+job:
 
-### Option A (si `uv` disponible)
-```bash
-cd $SCRATCH/nodulocc/<repo>
-module load StdEnv/2023 python
-uv sync --extra exp
+``` bash
+cd $SCRATCH
+tar -cf nodulocc_dataset.tar nodulocc_dataset/
 ```
 
-### Option B (fallback standard venv + pip)
-```bash
-cd $SCRATCH/nodulocc/<repo>
-module load StdEnv/2023 python
+## 3) Prepare the Python environment (on login node)
+
+``` bash
+cd $SCRATCH/NoduLoCC2026
+module load python/3.14.2 # adapt to what "module avail python" shows
 python -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
 pip install -e .[exp]
 ```
 
-## 4) Vérification rapide avant batch
+## 4) Quick check before batch
 
-```bash
-cd $SCRATCH/nodulocc/<repo>
-uv run python -m nodulocc.cli --help
-```
-
-Si tu n'utilises pas `uv`, utilise:
-```bash
-cd $SCRATCH/nodulocc/<repo>
+``` bash
+cd $SCRATCH/NoduLoCC2026
 source .venv/bin/activate
 python -m nodulocc.cli --help
 ```
 
-## 5) Script Slurm GPU (recommandé)
+## 5) Slurm GPU script
 
-Crée `train_gpu.slurm`:
+The repository contains a template: `train_gpu.slurm.example`
 
-```bash
-#!/bin/bash
-#SBATCH --account=def-xxx
-#SBATCH --job-name=nodulocc-train
-#SBATCH --time=0-06:00
-#SBATCH --gpus-per-node=a100:1
-#SBATCH --cpus-per-task=8
-#SBATCH --mem=32G
-#SBATCH --output=%x-%j.out
+Copy the template and edit the required fields (Slurm account, email):
 
-set -euo pipefail
-
-module load StdEnv/2023
-module load python/3.11  # exemple : adapte à ce que "module avail python" te montre
-cd $SCRATCH/nodulocc/<repo>
-source .venv/bin/activate
-
-export PYTHONUNBUFFERED=1
-export OMP_NUM_THREADS=${SLURM_CPUS_PER_TASK}
-
-# Important sur Narval: W&B offline est plus sûr.
-export WANDB_MODE=offline
-
-srun python -m nodulocc.cli train --config configs/classification.yaml \
-  --override data.dataset_root=$SCRATCH/nodulocc_dataset
+``` bash
+cd $SCRATCH/NoduLoCC2026
+cp train_gpu.slurm.example train_gpu.slurm
+nano train_gpu.slurm   # or vim
 ```
 
-Soumettre:
-```bash
+Submit:
+
+``` bash
 sbatch train_gpu.slurm
 ```
 
-## 6) Commandes utiles Slurm
+To automatically submit the job and synchronize W&B after completion,
+use the `submit_and_sync.sh` script:
 
-```bash
-squeue -u $USER
-sq
-sacct -j <JOBID> --format=JobID,JobName,State,Elapsed,MaxRSS
-scancel <JOBID>
+``` bash
+./submit_and_sync.sh
 ```
 
-## 7) K-fold et entraînement final
+## 6) Useful Slurm commands
+
+``` bash
+squeue -u $USER # view queued/running jobs
+sq # quick alias for squeue -u $USER
+sacct -j <JOBID> --format=JobID,JobName,State,Elapsed,MaxRSS # details of a finished job
+scancel <JOBID> # cancel a queued or running job
+sacct -j <JOBID> --format=JobID,State,Elapsed,MaxRSS,ReqMem # view resources used by a finished job
+```
+
+## 7) K-fold and final training
+
+Modify the configuration or use overrides to perform K-fold
+cross-validation or train on 100% of the data.
 
 ### K-fold
-```bash
+
+``` bash
 python -m nodulocc.cli train --config configs/classification.yaml \
-  --override data.dataset_root=$SCRATCH/nodulocc_dataset \
-  --override validation.mode=kfold \
-  --override validation.k=5
+    --override data.dataset_root=$SLURM_TMPDIR/nodulocc_dataset \
+    --override validation.mode=kfold \
+    --override validation.k=5
 ```
 
-### Entraînement final sur 100% des données
-```bash
+### Final training on 100% of the data
+
+``` bash
 python -m nodulocc.cli train --config configs/classification.yaml \
-  --override data.dataset_root=$SCRATCH/nodulocc_dataset \
-  --override train.full_data=true
+   --override data.dataset_root=$SLURM_TMPDIR/nodulocc_dataset \
+   --override train.full_data=true
 ```
 
-## 8) W&B sur Narval (important)
+## 8) W&B on Narval (important)
 
-D’après la doc Alliance, sur Narval il est recommandé d’utiliser `wandb` en mode offline pendant les jobs compute.
+According to Alliance documentation, on Narval it is recommended to use
+`wandb` in offline mode during compute jobs.
 
-Dans le job:
-```bash
+Inside the job:
+
+``` bash
 export WANDB_MODE=offline
 ```
 
-Après le job (login node), synchroniser:
-```bash
-cd $SCRATCH/nodulocc/<repo>
+After the job (on login node), synchronize:
+
+``` bash
+cd $SCRATCH/NoduLoCC2026
 source .venv/bin/activate
-wandb sync wandb/offline-run-*
+wandb sync --sync-all
 ```
 
-## 9) Bonnes pratiques HPC
+## 9) HPC best practices
 
-- Demander des ressources réalistes (`time`, `mem`, `cpus`, `gpu`) pour réduire la file d’attente.
-- Écrire checkpoints/logs dans `$SCRATCH` pendant le run.
-- Copier les résultats finaux importants vers `$PROJECT` en fin de campagne.
-- Versionner la config de run (`configs/*.yaml` + overrides) avec les checkpoints.
+-   Request realistic resources (`time`, `mem`, `cpus`, `gpu`) to reduce
+    queue time.
+-   Write checkpoints/logs to `$SCRATCH` during the run.
+-   Copy important final results to `$PROJECT` at the end of the
+    campaign.
+-   Version control the run configuration (`configs/*.yaml` + overrides)
+    along with checkpoints.
 
-## 10) Sources (à vérifier régulièrement)
+## 10) Sources
 
-- Alliance Doc: W&B sur clusters (Narval inclus) et mode offline.
-- Alliance Doc: principes Slurm/job scripts.
+-   Alliance Doc: W&B on clusters and offline mode.
+-   Alliance Doc: Slurm/job script principles.
 
-Les politiques cluster, modules et quotas peuvent évoluer: vérifier la doc Alliance/Calcul Québec avant une grosse campagne.
+Cluster policies, modules, and quotas may evolve: always check the
+Alliance/Calcul Québec documentation before running a large campaign.
