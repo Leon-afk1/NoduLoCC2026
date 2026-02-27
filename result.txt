@@ -1,0 +1,10 @@
+Warning: 113 images not found, filtering them out.
+Epoch 01 | loss=1.5555 | AUC=0.8058 P=0.0589 R=0.9445 F1=0.1108                                                                                           
+Epoch 02 | loss=1.0234 | AUC=0.8039 P=0.0891 R=0.8207 F1=0.1607                                                                                           
+Epoch 03 | loss=0.7786 | AUC=0.8159 P=0.0905 R=0.8373 F1=0.1633                                                                                           
+Epoch 04 | loss=0.6094 | AUC=0.8113 P=0.1013 R=0.7726 F1=0.1791                                                                                           
+Epoch 05 | loss=0.5255 | AUC=0.8091 P=0.1201 R=0.7079 F1=0.2053                                                                                           
+Epoch 06 | loss=0.4642 | AUC=0.8006 P=0.1686 R=0.5841 F1=0.2617                                                                                           
+Epoch 07 | loss=0.4159 | AUC=0.8063 P=0.1679 R=0.6026 F1=0.2626                                                                                           
+Epoch 08 | loss=0.3720 | AUC=0.7961 P=0.1292 R=0.6710 F1=0.2167                                                                                           
+[Grad-CAM] 00021310_001.png | prob=0.107 | center=(496,496) | LIDC_ID=

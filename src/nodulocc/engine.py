@@ -1,0 +1,480 @@
+"""Training, evaluation, and prediction engine for classification."""
+
+from __future__ import annotations
+
+import copy
+import re
+import time
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+import pandas as pd
+import torch
+import torch.nn as nn
+from tqdm import tqdm
+
+from .data import build_dataloaders, build_prediction_loader, load_classification_dataframe
+from .metrics import classification_metrics
+from .models import build_model
+from .tracking import Tracker
+
+
+def _sanitize_artifact_name(value: str) -> str:
+    """Convert arbitrary strings to artifact-safe names."""
+    safe = re.sub(r"[^A-Za-z0-9_.-]+", "-", value.strip())
+    return safe.strip("-") or "artifact"
+
+
+def _device_from_cfg(cfg: dict[str, Any]) -> torch.device:
+    """Resolve execution device from config (`auto` chooses CUDA when available)."""
+    value = str(cfg["train"].get("device", "auto"))
+    if value == "auto":
+        value = "cuda" if torch.cuda.is_available() else "cpu"
+    return torch.device(value)
+
+
+def _set_seed(seed: int) -> None:
+    """Set random seeds for reproducible runs."""
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    np.random.seed(seed)
+
+
+def _classification_pos_weight(train_df: pd.DataFrame, device: torch.device) -> torch.Tensor:
+    """Compute `pos_weight` for BCEWithLogits from class frequencies."""
+    n_pos = float((train_df["label"] == 1).sum())
+    n_neg = float((train_df["label"] == 0).sum())
+    return torch.tensor([n_neg / max(1.0, n_pos)], dtype=torch.float32, device=device)
+
+
+def _evaluate(
+    model: nn.Module,
+    loader: torch.utils.data.DataLoader,
+    device: torch.device,
+    threshold: float,
+) -> tuple[dict[str, float], np.ndarray, np.ndarray, list[str]]:
+    """Run classification evaluation on one dataloader and return predictions."""
+    model.eval()
+    ys, ps = [], []
+    file_names: list[str] = []
+    with torch.no_grad():
+        for batch in loader:
+            x = batch["image"].to(device)
+            y = batch["label"].to(device)
+            logit = model(x)
+            prob = torch.sigmoid(logit)
+            ys.append(y.detach().cpu().numpy())
+            ps.append(prob.detach().cpu().numpy())
+            file_names.extend([str(x) for x in batch["file_name"]])
+
+    y_true = np.concatenate(ys).astype(np.float32)
+    y_prob = np.concatenate(ps).astype(np.float32)
+    metrics = classification_metrics(y_true=y_true, y_prob=y_prob, threshold=threshold)
+    return metrics, y_true, y_prob, file_names
+
+
+def _run_single_training(
+    cfg: dict[str, Any],
+    train_loader: torch.utils.data.DataLoader,
+    val_loader: torch.utils.data.DataLoader | None,
+    train_df: pd.DataFrame,
+    device: torch.device,
+    ckpt_path: Path,
+    tracker: Tracker,
+    log_prefix: str,
+    tracking_group: str,
+) -> dict[str, Any]:
+    """Train one model run (holdout fold, k-fold fold, or full-data run)."""
+    model = build_model(task="classification", model_cfg=cfg["model"]).to(device)
+    optimizer = torch.optim.AdamW(
+        model.parameters(),
+        lr=float(cfg["train"].get("lr", 2e-4)),
+        weight_decay=float(cfg["train"].get("weight_decay", 1e-4)),
+    )
+    loss_fn = nn.BCEWithLogitsLoss(pos_weight=_classification_pos_weight(train_df, device))
+
+    epochs = int(cfg["train"].get("epochs", 1))
+    threshold = float(cfg.get("eval", {}).get("threshold", 0.5))
+
+    if val_loader is None:
+        monitor = "train_loss"
+        best_value = np.inf
+    else:
+        monitor = "f1"
+        best_value = -np.inf
+    best_outputs: tuple[np.ndarray, np.ndarray, list[str]] | None = None
+
+    for epoch in range(1, epochs + 1):
+        model.train()
+        running = 0.0
+        seen = 0
+
+        for batch in tqdm(train_loader, desc=f"train-{log_prefix}-e{epoch}", leave=False):
+            x = batch["image"].to(device)
+            y = batch["label"].to(device)
+
+            optimizer.zero_grad(set_to_none=True)
+            logit = model(x)
+            loss = loss_fn(logit, y)
+            loss.backward()
+            optimizer.step()
+
+            running += float(loss.item()) * x.size(0)
+            seen += x.size(0)
+
+        train_loss = running / max(1, seen)
+
+        if val_loader is None:
+            metrics = {"train_loss": float(train_loss)}
+            current = float(train_loss)
+            improved = current < best_value
+        else:
+            metrics, y_true, y_prob, file_names = _evaluate(model, val_loader, device, threshold=threshold)
+            metrics["train_loss"] = float(train_loss)
+            current = float(metrics["f1"])
+            improved = current > best_value
+
+        tracker.log({f"{log_prefix}/{k}": v for k, v in metrics.items()}, step=epoch)
+
+        if improved:
+            best_value = current
+            if val_loader is not None:
+                best_outputs = (y_true, y_prob, file_names)
+            torch.save(
+                {
+                    "task": "classification",
+                    "state_dict": model.state_dict(),
+                    "cfg": copy.deepcopy(cfg),
+                    "best_metric": best_value,
+                    "monitor": monitor,
+                    "tracking_group": tracking_group,
+                    "tracking_run_id": tracker.run_id,
+                },
+                ckpt_path,
+            )
+
+    if best_outputs is not None:
+        y_true, y_prob, file_names = best_outputs
+        tracker.log_classification_diagnostics(
+            prefix=f"{log_prefix}/best",
+            y_true=y_true,
+            y_prob=y_prob,
+            threshold=threshold,
+            file_names=file_names,
+        )
+    if bool(cfg.get("tracking", {}).get("log_artifacts", True)):
+        artifact_name = _sanitize_artifact_name(f"{tracking_group}-{log_prefix}-{ckpt_path.stem}-model")
+        tracker.log_file_artifact(
+            ckpt_path,
+            artifact_name=artifact_name,
+            artifact_type="model",
+            metadata={
+                "monitor": monitor,
+                "best_metric": float(best_value),
+                "tracking_group": tracking_group,
+                "log_prefix": log_prefix,
+            },
+        )
+
+    return {
+        "checkpoint": str(ckpt_path),
+        "best_metric": float(best_value),
+        "monitor": monitor,
+    }
+
+
+def train(cfg: dict[str, Any]) -> dict[str, Any]:
+    """Train model with holdout, k-fold, or full-data mode.
+
+    Config knobs:
+    - validation.mode: holdout | kfold
+    - validation.k: number of folds (kfold mode)
+    - train.full_data: if true, train once on 100% data without validation
+    """
+    task = cfg["task"]
+    if task != "classification":
+        raise ValueError("Only classification task is supported.")
+
+    _set_seed(int(cfg.get("seed", 42)))
+    device = _device_from_cfg(cfg)
+
+    output_dir = Path(cfg["train"].get("output_dir", "artifacts/checkpoints"))
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    mode = str(cfg.get("validation", {}).get("mode", "holdout")).lower()
+    full_data = bool(cfg["train"].get("full_data", False))
+
+    cfg_tracking_group = cfg.get("tracking", {}).get("group")
+    tracking_group = str(cfg_tracking_group) if cfg_tracking_group else f"train-{int(time.time())}"
+    tracker = Tracker(cfg, job_type="train", run_group=tracking_group)
+    start = time.time()
+    # Log dataset exploration once per training run (not once per fold).
+    tracker.log_data_exploration(
+        prefix="global",
+        train_df=load_classification_dataframe(cfg),
+        val_df=None,
+        seed=int(cfg.get("seed", 42)),
+    )
+
+    if full_data:
+        train_loader, _, train_df, _ = build_dataloaders(cfg, full_train=True)
+        ckpt_path = output_dir / "classification_full_best.pt"
+        run = _run_single_training(
+            cfg,
+            train_loader=train_loader,
+            val_loader=None,
+            train_df=train_df,
+            device=device,
+            ckpt_path=ckpt_path,
+            tracker=tracker,
+            log_prefix="full",
+            tracking_group=tracking_group,
+        )
+        elapsed = time.time() - start
+        tracker.log({"run/train_seconds": elapsed})
+        tracker.finish()
+        return {
+            "task": task,
+            "mode": "full",
+            "checkpoint": run["checkpoint"],
+            "best_metric": run["best_metric"],
+            "monitor": run["monitor"],
+            "train_seconds": float(elapsed),
+        }
+
+    if mode == "kfold":
+        k = int(cfg.get("validation", {}).get("k", 5))
+        fold_results: list[dict[str, Any]] = []
+        split_summary_rows: list[list[Any]] = []
+
+        for fold_idx in range(k):
+            train_loader, val_loader, train_df, val_df = build_dataloaders(cfg, fold_index=fold_idx)
+            ckpt_path = output_dir / f"classification_fold{fold_idx}_best.pt"
+            run = _run_single_training(
+                cfg,
+                train_loader=train_loader,
+                val_loader=val_loader,
+                train_df=train_df,
+                device=device,
+                ckpt_path=ckpt_path,
+                tracker=tracker,
+                log_prefix=f"fold{fold_idx}",
+                tracking_group=tracking_group,
+            )
+            fold_results.append(
+                {
+                    "fold": fold_idx,
+                    "checkpoint": run["checkpoint"],
+                    "f1": run["best_metric"],
+                }
+            )
+            n_train = int(len(train_df))
+            n_val = int(len(val_df)) if val_df is not None else 0
+            train_pos = int((train_df["label"] == 1).sum())
+            val_pos = int((val_df["label"] == 1).sum()) if val_df is not None else 0
+            split_summary_rows.append(
+                [
+                    int(fold_idx),
+                    n_train,
+                    n_val,
+                    float(train_pos / max(1, n_train)),
+                    float(val_pos / max(1, n_val)) if n_val > 0 else 0.0,
+                ]
+            )
+
+        f1_values = np.array([x["f1"] for x in fold_results], dtype=np.float32)
+        elapsed = time.time() - start
+        summary = {
+            "task": task,
+            "mode": "kfold",
+            "k": k,
+            "fold_results": fold_results,
+            "mean_f1": float(np.mean(f1_values)),
+            "std_f1": float(np.std(f1_values)),
+            "best_metric": float(np.mean(f1_values)),
+            "monitor": "mean_f1",
+            "train_seconds": float(elapsed),
+        }
+        tracker.log(
+            {
+                "kfold/mean_f1": summary["mean_f1"],
+                "kfold/std_f1": summary["std_f1"],
+                "run/train_seconds": summary["train_seconds"],
+            }
+        )
+        tracker.log_table(
+            key="kfold/fold_summary",
+            columns=["fold", "f1", "checkpoint"],
+            rows=[[int(x["fold"]), float(x["f1"]), str(x["checkpoint"])] for x in fold_results],
+        )
+        tracker.log_table(
+            key="kfold/split_summary",
+            columns=["fold", "n_train", "n_val", "train_pos_rate", "val_pos_rate"],
+            rows=split_summary_rows,
+        )
+        tracker.finish()
+        return summary
+
+    if mode != "holdout":
+        tracker.finish()
+        raise ValueError("validation.mode must be one of: holdout, kfold")
+
+    train_loader, val_loader, train_df, _ = build_dataloaders(cfg)
+    ckpt_path = output_dir / "classification_holdout_best.pt"
+    run = _run_single_training(
+        cfg,
+        train_loader=train_loader,
+        val_loader=val_loader,
+        train_df=train_df,
+        device=device,
+        ckpt_path=ckpt_path,
+        tracker=tracker,
+        log_prefix="holdout",
+        tracking_group=tracking_group,
+    )
+
+    elapsed = time.time() - start
+    tracker.log({"run/train_seconds": elapsed})
+    tracker.finish()
+
+    return {
+        "task": task,
+        "mode": "holdout",
+        "checkpoint": run["checkpoint"],
+        "best_metric": run["best_metric"],
+        "monitor": run["monitor"],
+        "train_seconds": float(elapsed),
+    }
+
+
+def evaluate(cfg: dict[str, Any], ckpt_path: str) -> dict[str, float]:
+    """Load checkpoint and evaluate on the configured validation split.
+
+    In k-fold mode, `validation.fold_index` selects the fold to evaluate.
+    """
+    if cfg["task"] != "classification":
+        raise ValueError("Only classification task is supported.")
+
+    if bool(cfg["train"].get("full_data", False)):
+        raise ValueError("Evaluation is not available when train.full_data=true.")
+
+    device = _device_from_cfg(cfg)
+    mode = str(cfg.get("validation", {}).get("mode", "holdout")).lower()
+    fold_index = int(cfg.get("validation", {}).get("fold_index", 0)) if mode == "kfold" else None
+
+    _, val_loader, _, _ = build_dataloaders(cfg, fold_index=fold_index)
+    if val_loader is None:
+        raise ValueError("No validation loader available.")
+
+    checkpoint = torch.load(ckpt_path, map_location=device)
+    checkpoint_group = checkpoint.get("tracking_group")
+    model = build_model(task="classification", model_cfg=cfg["model"]).to(device)
+    model.load_state_dict(checkpoint["state_dict"])
+
+    metrics, y_true, y_prob, file_names = _evaluate(
+        model,
+        val_loader,
+        device,
+        threshold=float(cfg.get("eval", {}).get("threshold", 0.5)),
+    )
+    if mode == "kfold":
+        metrics["fold"] = float(fold_index if fold_index is not None else 0)
+
+    if bool(cfg.get("tracking", {}).get("log_eval_runs", True)):
+        tracker = Tracker(
+            cfg,
+            run_name_suffix="eval",
+            job_type="eval",
+            run_group=str(checkpoint_group) if checkpoint_group else None,
+        )
+        tracker.log({f"eval/{k}": v for k, v in metrics.items()})
+        tracker.log_classification_diagnostics(
+            prefix="eval",
+            y_true=y_true,
+            y_prob=y_prob,
+            threshold=float(cfg.get("eval", {}).get("threshold", 0.5)),
+            file_names=file_names,
+        )
+        tracker.finish()
+    return metrics
+
+
+def predict(cfg: dict[str, Any], ckpt_path: str, out_path: str, split: str = "val") -> str:
+    """Generate classification predictions and export CSV.
+
+    Output columns:
+    - file_name
+    - prob_nodule
+    - pred_label
+
+    In k-fold mode, `validation.fold_index` selects fold for train/val splits.
+    """
+    if cfg["task"] != "classification":
+        raise ValueError("Only classification task is supported.")
+
+    device = _device_from_cfg(cfg)
+    mode = str(cfg.get("validation", {}).get("mode", "holdout")).lower()
+    fold_index = int(cfg.get("validation", {}).get("fold_index", 0)) if mode == "kfold" else None
+
+    loader = build_prediction_loader(cfg, split=split, fold_index=fold_index)
+
+    checkpoint = torch.load(ckpt_path, map_location=device)
+    checkpoint_group = checkpoint.get("tracking_group")
+    model = build_model(task="classification", model_cfg=cfg["model"]).to(device)
+    model.load_state_dict(checkpoint["state_dict"])
+    model.eval()
+
+    threshold = float(cfg.get("eval", {}).get("threshold", 0.5))
+    out_rows: list[dict[str, Any]] = []
+
+    with torch.no_grad():
+        for batch in loader:
+            x = batch["image"].to(device)
+            prob = torch.sigmoid(model(x)).detach().cpu().numpy()
+
+            for i, file_name in enumerate(batch["file_name"]):
+                p = float(prob[i])
+                out_rows.append(
+                    {
+                        "file_name": str(file_name),
+                        "prob_nodule": p,
+                        "pred_label": int(p >= threshold),
+                    }
+                )
+
+    out = Path(out_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(out_rows).to_csv(out, index=False)
+
+    if bool(cfg.get("tracking", {}).get("log_predict_runs", True)):
+        tracker = Tracker(
+            cfg,
+            run_name_suffix="predict",
+            job_type="predict",
+            run_group=str(checkpoint_group) if checkpoint_group else None,
+        )
+        tracker.log(
+            {
+                "predict/rows": float(len(out_rows)),
+                "predict/threshold": threshold,
+                "predict/split": split,
+            }
+        )
+        if bool(cfg.get("tracking", {}).get("log_artifacts", True)):
+            artifact_name = _sanitize_artifact_name(
+                f"{str(checkpoint_group) if checkpoint_group else 'predict'}-{Path(ckpt_path).stem}-{split}-predictions"
+            )
+            tracker.log_file_artifact(
+                out,
+                artifact_name=artifact_name,
+                artifact_type="predictions",
+                metadata={
+                    "split": split,
+                    "rows": len(out_rows),
+                    "checkpoint": str(ckpt_path),
+                    "tracking_group": checkpoint_group,
+                },
+            )
+        tracker.finish()
+    return str(out)
