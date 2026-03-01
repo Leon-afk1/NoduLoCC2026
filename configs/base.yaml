@@ -6,6 +6,10 @@ data:
   classification:
     labels_csv: classification_labels.csv
     images_subdir: nih_filtered_images
+  normalization:
+    enabled: true
+    mean: [0.485, 0.456, 0.406]
+    std: [0.229, 0.224, 0.225]
   val_size: 0.2
   split_dir: artifacts/splits
 
@@ -28,11 +32,26 @@ train:
   weight_decay: 0.0001
   img_size: 512
   use_weighted_sampler: true
+  loss:
+    name: bce               # bce | focal
+    focal_gamma: 2.0        # used only when name=focal
+    focal_alpha: 0.25       # used only when name=focal (set null to disable alpha weighting)
+    use_pos_weight: true
+  scheduler:
+    name: cosine            # none | cosine
+    warmup_epochs: 1
+    min_lr: 0.00001
   full_data: false    # true => train once on 100% data without validation
   output_dir: artifacts/checkpoints
 
 eval:
   threshold: 0.5
+  auto_threshold_search: true
+  threshold_search_min: 0.05
+  threshold_search_max: 0.95
+  threshold_search_steps: 181
+  threshold_output_dir: artifacts/thresholds
+  use_oof_threshold: false
 
 tracking:
   enabled: true

@@ -36,7 +36,34 @@ def _load_image(path: Path) -> Image.Image:
     return img
 
 
-def _image_tfm(img_size: int, train: bool) -> transforms.Compose:
+def _normalization_stats(cfg: dict[str, Any]) -> tuple[list[float], list[float]] | None:
+    """Return normalization stats from config or None when disabled.
+
+    Expected config block:
+    data:
+      normalization:
+        enabled: true
+        mean: [0.485, 0.456, 0.406]
+        std: [0.229, 0.224, 0.225]
+    """
+    norm_cfg = cfg.get("data", {}).get("normalization", {})
+    if not bool(norm_cfg.get("enabled", True)):
+        return None
+
+    mean = norm_cfg.get("mean", [0.485, 0.456, 0.406])
+    std = norm_cfg.get("std", [0.229, 0.224, 0.225])
+
+    if not isinstance(mean, list) or not isinstance(std, list) or len(mean) != 3 or len(std) != 3:
+        raise ValueError("data.normalization.mean/std must be 3-element lists")
+
+    return [float(x) for x in mean], [float(x) for x in std]
+
+
+def _image_tfm(
+    img_size: int,
+    train: bool,
+    normalization: tuple[list[float], list[float]] | None,
+) -> transforms.Compose:
     """Build image transforms for classification."""
     ops: list[Any] = [transforms.Resize((img_size, img_size))]
     if train:
@@ -52,6 +79,9 @@ def _image_tfm(img_size: int, train: bool) -> transforms.Compose:
             transforms.Lambda(lambda t: t.repeat(3, 1, 1)),
         ]
     )
+    if normalization is not None:
+        mean, std = normalization
+        ops.append(transforms.Normalize(mean=mean, std=std))
     return transforms.Compose(ops)
 
 
@@ -199,10 +229,16 @@ def _split_dataframe(
 class ClassificationDataset(Dataset):
     """PyTorch dataset for binary classification samples."""
 
-    def __init__(self, df: pd.DataFrame, img_size: int, train: bool) -> None:
+    def __init__(
+        self,
+        df: pd.DataFrame,
+        img_size: int,
+        train: bool,
+        normalization: tuple[list[float], list[float]] | None,
+    ) -> None:
         """Store metadata and build per-split transforms."""
         self.df = df.reset_index(drop=True)
-        self.tfm = _image_tfm(img_size=img_size, train=train)
+        self.tfm = _image_tfm(img_size=img_size, train=train, normalization=normalization)
 
     def __len__(self) -> int:
         return len(self.df)
@@ -257,9 +293,10 @@ def build_dataloaders(
     batch_size = int(cfg["train"]["batch_size"])
     workers = int(cfg["train"].get("num_workers", 0))
     img_size = int(cfg["train"].get("img_size", 512))
+    normalization = _normalization_stats(cfg)
     pin_memory = torch.cuda.is_available()
 
-    train_ds = ClassificationDataset(train_df, img_size=img_size, train=True)
+    train_ds = ClassificationDataset(train_df, img_size=img_size, train=True, normalization=normalization)
     sampler = None
     if bool(cfg["train"].get("use_weighted_sampler", True)):
         sampler = _classification_sampler(train_df)
@@ -277,7 +314,7 @@ def build_dataloaders(
     if val_df is None:
         return train_loader, None, train_df, None
 
-    val_ds = ClassificationDataset(val_df, img_size=img_size, train=False)
+    val_ds = ClassificationDataset(val_df, img_size=img_size, train=False, normalization=normalization)
     val_loader = DataLoader(
         val_ds,
         batch_size=batch_size,
@@ -297,6 +334,7 @@ def build_prediction_loader(
     img_size = int(cfg["train"].get("img_size", 512))
     workers = int(cfg["train"].get("num_workers", 0))
     batch_size = int(cfg["train"]["batch_size"])
+    normalization = _normalization_stats(cfg)
     pin_memory = torch.cuda.is_available()
 
     if split not in {"train", "val", "all"}:
@@ -314,7 +352,7 @@ def build_prediction_loader(
             if df is None:
                 raise ValueError("No validation split available in full-data mode")
 
-    ds = ClassificationDataset(df, img_size=img_size, train=False)
+    ds = ClassificationDataset(df, img_size=img_size, train=False, normalization=normalization)
     return DataLoader(
         ds,
         batch_size=batch_size,

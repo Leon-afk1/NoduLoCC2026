@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import json
 import re
 import time
 from pathlib import Path
@@ -12,10 +13,11 @@ import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from tqdm import tqdm
 
 from .data import build_dataloaders, build_prediction_loader, load_classification_dataframe
-from .metrics import classification_metrics
+from .metrics import classification_metrics, find_best_f1_threshold
 from .models import build_model
 from .tracking import Tracker
 
@@ -46,6 +48,114 @@ def _classification_pos_weight(train_df: pd.DataFrame, device: torch.device) -> 
     n_pos = float((train_df["label"] == 1).sum())
     n_neg = float((train_df["label"] == 0).sum())
     return torch.tensor([n_neg / max(1.0, n_pos)], dtype=torch.float32, device=device)
+
+
+class BinaryFocalLoss(nn.Module):
+    """Binary focal loss with optional class reweighting via `pos_weight`."""
+
+    def __init__(self, gamma: float, alpha: float | None = None, pos_weight: torch.Tensor | None = None) -> None:
+        super().__init__()
+        self.gamma = float(gamma)
+        self.alpha = None if alpha is None else float(alpha)
+        self.pos_weight = pos_weight
+
+    def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        """Compute focal loss on logits/targets of shape `[B]`."""
+        targets = targets.float()
+        bce = F.binary_cross_entropy_with_logits(logits, targets, reduction="none")
+
+        if self.pos_weight is not None:
+            pos_w = float(self.pos_weight.detach().cpu().item())
+            sample_w = torch.where(targets > 0.5, pos_w, 1.0)
+            bce = bce * sample_w
+
+        prob = torch.sigmoid(logits)
+        pt = torch.where(targets > 0.5, prob, 1.0 - prob)
+        focal_term = torch.pow(1.0 - pt, self.gamma)
+
+        if self.alpha is not None:
+            alpha_t = torch.where(targets > 0.5, self.alpha, 1.0 - self.alpha)
+            focal_term = focal_term * alpha_t
+
+        return (focal_term * bce).mean()
+
+
+def _build_loss_fn(cfg: dict[str, Any], train_df: pd.DataFrame, device: torch.device) -> nn.Module:
+    """Build training loss from config (`bce` or `focal`)."""
+    loss_cfg = cfg.get("train", {}).get("loss", {})
+    loss_name = str(loss_cfg.get("name", "bce")).lower()
+    use_pos_weight = bool(loss_cfg.get("use_pos_weight", True))
+    pos_weight = _classification_pos_weight(train_df, device) if use_pos_weight else None
+
+    if loss_name == "bce":
+        return nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+    if loss_name == "focal":
+        return BinaryFocalLoss(
+            gamma=float(loss_cfg.get("focal_gamma", 2.0)),
+            alpha=float(loss_cfg["focal_alpha"]) if loss_cfg.get("focal_alpha") is not None else None,
+            pos_weight=pos_weight,
+        )
+
+    raise ValueError("train.loss.name must be one of: bce, focal")
+
+
+def _build_epoch_lrs(cfg: dict[str, Any], epochs: int, base_lr: float) -> list[float]:
+    """Build per-epoch learning rates from scheduler config."""
+    sched_cfg = cfg.get("train", {}).get("scheduler", {})
+    name = str(sched_cfg.get("name", "none")).lower()
+    if name in {"none", "off", "disabled"}:
+        return [float(base_lr)] * epochs
+    if name != "cosine":
+        raise ValueError("train.scheduler.name must be one of: none, cosine")
+
+    warmup_epochs = int(sched_cfg.get("warmup_epochs", 0))
+    warmup_epochs = max(0, min(warmup_epochs, epochs))
+    min_lr = float(sched_cfg.get("min_lr", base_lr * 0.05))
+    if min_lr <= 0.0:
+        raise ValueError("train.scheduler.min_lr must be > 0")
+
+    lrs: list[float] = []
+    for epoch_idx in range(epochs):
+        if warmup_epochs > 0 and epoch_idx < warmup_epochs:
+            lr = base_lr * float(epoch_idx + 1) / float(warmup_epochs)
+        else:
+            remaining = max(1, epochs - warmup_epochs)
+            progress = float(epoch_idx - warmup_epochs + 1) / float(remaining)
+            cosine = 0.5 * (1.0 + np.cos(np.pi * progress))
+            lr = min_lr + (base_lr - min_lr) * cosine
+        lrs.append(float(lr))
+    return lrs
+
+
+def _set_optimizer_lr(optimizer: torch.optim.Optimizer, lr: float) -> None:
+    """Set learning rate on all optimizer parameter groups."""
+    for group in optimizer.param_groups:
+        group["lr"] = float(lr)
+
+
+def _threshold_output_path(cfg: dict[str, Any], k: int) -> Path:
+    """Return path where OOF threshold search results are persisted."""
+    out_dir = Path(cfg.get("eval", {}).get("threshold_output_dir", "artifacts/thresholds"))
+    out_dir.mkdir(parents=True, exist_ok=True)
+    return out_dir / f"classification_kfold_k{k}_seed{int(cfg.get('seed', 42))}.json"
+
+
+def _resolve_eval_threshold(cfg: dict[str, Any], mode: str) -> float:
+    """Resolve threshold for eval/predict, optionally from OOF k-fold search file."""
+    threshold = float(cfg.get("eval", {}).get("threshold", 0.5))
+    if mode != "kfold":
+        return threshold
+    if not bool(cfg.get("eval", {}).get("use_oof_threshold", False)):
+        return threshold
+
+    k = int(cfg.get("validation", {}).get("k", 5))
+    threshold_path = _threshold_output_path(cfg, k)
+    if not threshold_path.is_file():
+        print(f"[eval] OOF threshold file not found at {threshold_path}, fallback to eval.threshold={threshold:.4f}")
+        return threshold
+
+    payload = json.loads(threshold_path.read_text())
+    return float(payload.get("oof_best_threshold", threshold))
 
 
 def _evaluate(
@@ -86,15 +196,16 @@ def _run_single_training(
     tracking_group: str,
 ) -> dict[str, Any]:
     """Train one model run (holdout fold, k-fold fold, or full-data run)."""
+    base_lr = float(cfg["train"].get("lr", 2e-4))
     model = build_model(task="classification", model_cfg=cfg["model"]).to(device)
     optimizer = torch.optim.AdamW(
         model.parameters(),
-        lr=float(cfg["train"].get("lr", 2e-4)),
+        lr=base_lr,
         weight_decay=float(cfg["train"].get("weight_decay", 1e-4)),
     )
-    loss_fn = nn.BCEWithLogitsLoss(pos_weight=_classification_pos_weight(train_df, device))
-
     epochs = int(cfg["train"].get("epochs", 1))
+    loss_fn = _build_loss_fn(cfg, train_df, device)
+    epoch_lrs = _build_epoch_lrs(cfg, epochs=epochs, base_lr=base_lr)
     threshold = float(cfg.get("eval", {}).get("threshold", 0.5))
 
     if val_loader is None:
@@ -106,6 +217,9 @@ def _run_single_training(
     best_outputs: tuple[np.ndarray, np.ndarray, list[str]] | None = None
 
     for epoch in range(1, epochs + 1):
+        lr = float(epoch_lrs[epoch - 1])
+        _set_optimizer_lr(optimizer, lr)
+
         model.train()
         running = 0.0
         seen = 0
@@ -126,12 +240,13 @@ def _run_single_training(
         train_loss = running / max(1, seen)
 
         if val_loader is None:
-            metrics = {"train_loss": float(train_loss)}
+            metrics = {"train_loss": float(train_loss), "lr": lr}
             current = float(train_loss)
             improved = current < best_value
         else:
             metrics, y_true, y_prob, file_names = _evaluate(model, val_loader, device, threshold=threshold)
             metrics["train_loss"] = float(train_loss)
+            metrics["lr"] = lr
             current = float(metrics["f1"])
             improved = current > best_value
 
@@ -181,6 +296,7 @@ def _run_single_training(
         "checkpoint": str(ckpt_path),
         "best_metric": float(best_value),
         "monitor": monitor,
+        "_best_outputs": best_outputs,
     }
 
 
@@ -247,6 +363,8 @@ def train(cfg: dict[str, Any]) -> dict[str, Any]:
         k = int(cfg.get("validation", {}).get("k", 5))
         fold_results: list[dict[str, Any]] = []
         split_summary_rows: list[list[Any]] = []
+        oof_true: list[np.ndarray] = []
+        oof_prob: list[np.ndarray] = []
 
         for fold_idx in range(k):
             train_loader, val_loader, train_df, val_df = build_dataloaders(cfg, fold_index=fold_idx)
@@ -269,6 +387,11 @@ def train(cfg: dict[str, Any]) -> dict[str, Any]:
                     "f1": run["best_metric"],
                 }
             )
+            best_outputs = run.get("_best_outputs")
+            if best_outputs is not None:
+                fold_y_true, fold_y_prob, _ = best_outputs
+                oof_true.append(fold_y_true)
+                oof_prob.append(fold_y_prob)
             n_train = int(len(train_df))
             n_val = int(len(val_df)) if val_df is not None else 0
             train_pos = int((train_df["label"] == 1).sum())
@@ -296,6 +419,39 @@ def train(cfg: dict[str, Any]) -> dict[str, Any]:
             "monitor": "mean_f1",
             "train_seconds": float(elapsed),
         }
+
+        auto_threshold_enabled = bool(cfg.get("eval", {}).get("auto_threshold_search", True))
+        if auto_threshold_enabled and oof_true and oof_prob:
+            y_true_oof = np.concatenate(oof_true).astype(np.float32)
+            y_prob_oof = np.concatenate(oof_prob).astype(np.float32)
+            default_threshold = float(cfg.get("eval", {}).get("threshold", 0.5))
+            best_threshold = find_best_f1_threshold(
+                y_true_oof,
+                y_prob_oof,
+                min_threshold=float(cfg.get("eval", {}).get("threshold_search_min", 0.05)),
+                max_threshold=float(cfg.get("eval", {}).get("threshold_search_max", 0.95)),
+                steps=int(cfg.get("eval", {}).get("threshold_search_steps", 181)),
+            )
+            default_metrics = classification_metrics(y_true=y_true_oof, y_prob=y_prob_oof, threshold=default_threshold)
+            threshold_payload = {
+                "k": k,
+                "seed": int(cfg.get("seed", 42)),
+                "oof_size": int(len(y_true_oof)),
+                "default_threshold": float(default_threshold),
+                "f1_at_default_threshold": float(default_metrics["f1"]),
+                "oof_best_threshold": float(best_threshold["threshold"]),
+                "oof_best_f1": float(best_threshold["f1"]),
+                "oof_best_precision": float(best_threshold["precision"]),
+                "oof_best_recall": float(best_threshold["recall"]),
+            }
+            threshold_path = _threshold_output_path(cfg, k)
+            threshold_path.write_text(json.dumps(threshold_payload, indent=2))
+
+            summary["oof_best_threshold"] = float(best_threshold["threshold"])
+            summary["oof_best_f1"] = float(best_threshold["f1"])
+            summary["oof_f1_at_default_threshold"] = float(default_metrics["f1"])
+            summary["threshold_file"] = str(threshold_path)
+
         tracker.log(
             {
                 "kfold/mean_f1": summary["mean_f1"],
@@ -303,6 +459,14 @@ def train(cfg: dict[str, Any]) -> dict[str, Any]:
                 "run/train_seconds": summary["train_seconds"],
             }
         )
+        if "oof_best_threshold" in summary:
+            tracker.log(
+                {
+                    "kfold/oof_best_threshold": summary["oof_best_threshold"],
+                    "kfold/oof_best_f1": summary["oof_best_f1"],
+                    "kfold/oof_f1_at_default_threshold": summary["oof_f1_at_default_threshold"],
+                }
+            )
         tracker.log_table(
             key="kfold/fold_summary",
             columns=["fold", "f1", "checkpoint"],
@@ -362,6 +526,7 @@ def evaluate(cfg: dict[str, Any], ckpt_path: str) -> dict[str, float]:
     device = _device_from_cfg(cfg)
     mode = str(cfg.get("validation", {}).get("mode", "holdout")).lower()
     fold_index = int(cfg.get("validation", {}).get("fold_index", 0)) if mode == "kfold" else None
+    threshold = _resolve_eval_threshold(cfg, mode)
 
     _, val_loader, _, _ = build_dataloaders(cfg, fold_index=fold_index)
     if val_loader is None:
@@ -376,10 +541,11 @@ def evaluate(cfg: dict[str, Any], ckpt_path: str) -> dict[str, float]:
         model,
         val_loader,
         device,
-        threshold=float(cfg.get("eval", {}).get("threshold", 0.5)),
+        threshold=threshold,
     )
     if mode == "kfold":
         metrics["fold"] = float(fold_index if fold_index is not None else 0)
+    metrics["threshold"] = float(threshold)
 
     if bool(cfg.get("tracking", {}).get("log_eval_runs", True)):
         tracker = Tracker(
@@ -393,7 +559,7 @@ def evaluate(cfg: dict[str, Any], ckpt_path: str) -> dict[str, float]:
             prefix="eval",
             y_true=y_true,
             y_prob=y_prob,
-            threshold=float(cfg.get("eval", {}).get("threshold", 0.5)),
+            threshold=threshold,
             file_names=file_names,
         )
         tracker.finish()
@@ -425,7 +591,7 @@ def predict(cfg: dict[str, Any], ckpt_path: str, out_path: str, split: str = "va
     model.load_state_dict(checkpoint["state_dict"])
     model.eval()
 
-    threshold = float(cfg.get("eval", {}).get("threshold", 0.5))
+    threshold = _resolve_eval_threshold(cfg, mode)
     out_rows: list[dict[str, Any]] = []
 
     with torch.no_grad():

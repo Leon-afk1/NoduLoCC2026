@@ -71,6 +71,15 @@ Config keys:
 - `validation.fold_index`: fold selected for `eval` / `predict`
 - `train.full_data`: `true` to train on 100% data (no validation)
 
+## Training knobs
+- `data.normalization`: input normalization (`enabled`, `mean`, `std`)
+- `train.loss.name`: `bce` or `focal`
+- `train.loss.focal_gamma`, `train.loss.focal_alpha`, `train.loss.use_pos_weight`
+- `train.scheduler.name`: `none` or `cosine`
+- `train.scheduler.warmup_epochs`, `train.scheduler.min_lr`
+- `eval.auto_threshold_search`: in `kfold`, compute best OOF threshold (F1) and save it to `artifacts/thresholds/`
+- `eval.use_oof_threshold`: in `kfold` eval/predict, load and use saved OOF threshold automatically
+
 ## CLI
 ### Holdout training (80/20)
 ```bash
@@ -83,6 +92,7 @@ uv run python -m nodulocc.cli train --config configs/classification.yaml \
   --override validation.mode=kfold \
   --override validation.k=5
 ```
+This run now saves OOF threshold search results in `artifacts/thresholds/classification_kfold_k5_seed42.json`.
 
 ### Evaluate one fold model
 ```bash
@@ -90,7 +100,8 @@ uv run python -m nodulocc.cli eval --config configs/classification.yaml \
   --ckpt artifacts/checkpoints/classification_fold0_best.pt \
   --fold 0 \
   --override validation.mode=kfold \
-  --override validation.k=5
+  --override validation.k=5 \
+  --override eval.use_oof_threshold=true
 ```
 
 ### Full-data final training (100%)
@@ -104,6 +115,17 @@ uv run python -m nodulocc.cli train --config configs/classification.yaml \
 uv run python -m nodulocc.cli predict --config configs/classification.yaml \
   --ckpt artifacts/checkpoints/classification_holdout_best.pt \
   --out artifacts/preds_classification.csv
+```
+
+### Focal loss + cosine scheduler example
+```bash
+uv run python -m nodulocc.cli train --config configs/classification.yaml \
+  --override train.loss.name=focal \
+  --override train.loss.focal_gamma=2.0 \
+  --override train.loss.focal_alpha=0.25 \
+  --override train.scheduler.name=cosine \
+  --override train.scheduler.warmup_epochs=1 \
+  --override train.scheduler.min_lr=1e-5
 ```
 
 ## Notes
