@@ -30,10 +30,10 @@ def _resolve(path_root: Path, value: str) -> Path:
 
 def _load_image(path: Path) -> Image.Image:
     """Load an image as grayscale (`L`) to keep preprocessing consistent."""
-    img = Image.open(path)
-    if img.mode != "L":
-        img = img.convert("L")
-    return img
+    with Image.open(path) as img:
+        if img.mode != "L":
+            return img.convert("L")
+        return img.copy()
 
 
 def _normalization_stats(cfg: dict[str, Any]) -> tuple[list[float], list[float]] | None:
@@ -236,8 +236,15 @@ class ClassificationDataset(Dataset):
         train: bool,
         normalization: tuple[list[float], list[float]] | None,
     ) -> None:
-        """Store metadata and build per-split transforms."""
+        """Store metadata and build per-split transforms.
+
+        We materialize file paths and labels as arrays once to reduce per-sample
+        pandas indexing overhead in `__getitem__`.
+        """
         self.df = df.reset_index(drop=True)
+        self._image_paths = self.df["image_path"].astype(str).tolist()
+        self._file_names = self.df["file_name"].astype(str).tolist()
+        self._labels = self.df["label"].astype(np.float32).to_numpy()
         self.tfm = _image_tfm(img_size=img_size, train=train, normalization=normalization)
 
     def __len__(self) -> int:
@@ -245,13 +252,12 @@ class ClassificationDataset(Dataset):
 
     def __getitem__(self, idx: int) -> dict[str, Any]:
         """Return one sample with image tensor and binary label."""
-        row = self.df.iloc[idx]
-        img = _load_image(Path(row["image_path"]))
+        img = _load_image(Path(self._image_paths[idx]))
 
         return {
             "image": self.tfm(img),
-            "label": torch.tensor(float(row["label"]), dtype=torch.float32),
-            "file_name": str(row["file_name"]),
+            "label": torch.tensor(float(self._labels[idx]), dtype=torch.float32),
+            "file_name": self._file_names[idx],
         }
 
 
@@ -291,37 +297,48 @@ def build_dataloaders(
     """Create train/validation dataloaders for classification."""
     train_df, val_df = prepare_frames(cfg, fold_index=fold_index, full_train=full_train)
     batch_size = int(cfg["train"]["batch_size"])
-    workers = int(cfg["train"].get("num_workers", 0))
+    workers = int(cfg["train"].get("num_workers", 8))
     img_size = int(cfg["train"].get("img_size", 512))
     normalization = _normalization_stats(cfg)
-    pin_memory = torch.cuda.is_available()
+    pin_memory = bool(cfg["train"].get("pin_memory", torch.cuda.is_available()))
+    persistent_workers = bool(cfg["train"].get("persistent_workers", True))
+    prefetch_factor = int(cfg["train"].get("prefetch_factor", 4))
+    drop_last_train = bool(cfg["train"].get("drop_last_train", False))
 
     train_ds = ClassificationDataset(train_df, img_size=img_size, train=True, normalization=normalization)
     sampler = None
     if bool(cfg["train"].get("use_weighted_sampler", True)):
         sampler = _classification_sampler(train_df)
 
-    train_loader = DataLoader(
-        train_ds,
-        batch_size=batch_size,
-        shuffle=(sampler is None),
-        sampler=sampler,
-        num_workers=workers,
-        pin_memory=pin_memory,
-        drop_last=False,
-    )
+    train_loader_kwargs: dict[str, Any] = {
+        "dataset": train_ds,
+        "batch_size": batch_size,
+        "shuffle": (sampler is None),
+        "sampler": sampler,
+        "num_workers": workers,
+        "pin_memory": pin_memory,
+        "drop_last": drop_last_train,
+    }
+    if workers > 0:
+        train_loader_kwargs["persistent_workers"] = persistent_workers
+        train_loader_kwargs["prefetch_factor"] = prefetch_factor
+    train_loader = DataLoader(**train_loader_kwargs)
 
     if val_df is None:
         return train_loader, None, train_df, None
 
     val_ds = ClassificationDataset(val_df, img_size=img_size, train=False, normalization=normalization)
-    val_loader = DataLoader(
-        val_ds,
-        batch_size=batch_size,
-        shuffle=False,
-        num_workers=workers,
-        pin_memory=pin_memory,
-    )
+    val_loader_kwargs: dict[str, Any] = {
+        "dataset": val_ds,
+        "batch_size": batch_size,
+        "shuffle": False,
+        "num_workers": workers,
+        "pin_memory": pin_memory,
+    }
+    if workers > 0:
+        val_loader_kwargs["persistent_workers"] = persistent_workers
+        val_loader_kwargs["prefetch_factor"] = prefetch_factor
+    val_loader = DataLoader(**val_loader_kwargs)
     return train_loader, val_loader, train_df, val_df
 
 
@@ -332,10 +349,12 @@ def build_prediction_loader(
 ) -> DataLoader:
     """Create inference dataloader for `train`, `val`, or `all` split."""
     img_size = int(cfg["train"].get("img_size", 512))
-    workers = int(cfg["train"].get("num_workers", 0))
+    workers = int(cfg["train"].get("num_workers", 8))
     batch_size = int(cfg["train"]["batch_size"])
     normalization = _normalization_stats(cfg)
-    pin_memory = torch.cuda.is_available()
+    pin_memory = bool(cfg["train"].get("pin_memory", torch.cuda.is_available()))
+    persistent_workers = bool(cfg["train"].get("persistent_workers", True))
+    prefetch_factor = int(cfg["train"].get("prefetch_factor", 4))
 
     if split not in {"train", "val", "all"}:
         raise ValueError("split must be one of: train, val, all")
@@ -353,10 +372,14 @@ def build_prediction_loader(
                 raise ValueError("No validation split available in full-data mode")
 
     ds = ClassificationDataset(df, img_size=img_size, train=False, normalization=normalization)
-    return DataLoader(
-        ds,
-        batch_size=batch_size,
-        shuffle=False,
-        num_workers=workers,
-        pin_memory=pin_memory,
-    )
+    pred_loader_kwargs: dict[str, Any] = {
+        "dataset": ds,
+        "batch_size": batch_size,
+        "shuffle": False,
+        "num_workers": workers,
+        "pin_memory": pin_memory,
+    }
+    if workers > 0:
+        pred_loader_kwargs["persistent_workers"] = persistent_workers
+        pred_loader_kwargs["prefetch_factor"] = prefetch_factor
+    return DataLoader(**pred_loader_kwargs)

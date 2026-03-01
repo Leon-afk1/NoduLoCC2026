@@ -26,7 +26,18 @@ model:
 train:
   device: auto
   batch_size: 16
-  num_workers: 0
+  num_workers: 8
+  pin_memory: true
+  persistent_workers: true
+  prefetch_factor: 4
+  drop_last_train: false
+  precision: bf16        # fp32 | bf16 | fp16
+  channels_last: true
+  cudnn_benchmark: true
+  tf32: true
+  matmul_precision: high # highest | high | medium
+  compile: false
+  compile_mode: default
   epochs: 4
   lr: 0.0002
   weight_decay: 0.0001

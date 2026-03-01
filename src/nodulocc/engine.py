@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+from contextlib import nullcontext
 import json
 import re
 import sys
@@ -42,6 +43,63 @@ def _set_seed(seed: int) -> None:
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
     np.random.seed(seed)
+
+
+def _configure_runtime(cfg: dict[str, Any], device: torch.device) -> None:
+    """Apply backend settings that improve GPU throughput."""
+    train_cfg = cfg.get("train", {})
+    if device.type != "cuda":
+        return
+
+    torch.backends.cudnn.benchmark = bool(train_cfg.get("cudnn_benchmark", True))
+    allow_tf32 = bool(train_cfg.get("tf32", True))
+    torch.backends.cuda.matmul.allow_tf32 = allow_tf32
+    torch.backends.cudnn.allow_tf32 = allow_tf32
+
+    matmul_precision = str(train_cfg.get("matmul_precision", "high")).lower()
+    if matmul_precision in {"highest", "high", "medium"}:
+        torch.set_float32_matmul_precision(matmul_precision)
+
+
+def _resolve_precision(cfg: dict[str, Any], device: torch.device) -> str:
+    """Resolve train/eval precision mode for autocast."""
+    precision = str(cfg.get("train", {}).get("precision", "bf16")).lower()
+    if precision not in {"fp32", "bf16", "fp16"}:
+        raise ValueError("train.precision must be one of: fp32, bf16, fp16")
+    if device.type != "cuda" and precision != "fp32":
+        # Non-CUDA backends use standard fp32 path in this project.
+        return "fp32"
+    return precision
+
+
+def _autocast_context(device: torch.device, precision: str) -> Any:
+    """Return autocast context manager for configured precision."""
+    if device.type != "cuda" or precision == "fp32":
+        return nullcontext()
+    if precision == "bf16":
+        return torch.autocast(device_type="cuda", dtype=torch.bfloat16)
+    if precision == "fp16":
+        return torch.autocast(device_type="cuda", dtype=torch.float16)
+    return nullcontext()
+
+
+def _use_channels_last(cfg: dict[str, Any], device: torch.device) -> bool:
+    """Whether to use channels-last memory format for convolutions."""
+    return bool(cfg.get("train", {}).get("channels_last", True)) and device.type == "cuda"
+
+
+def _compile_model_if_enabled(cfg: dict[str, Any], model: nn.Module) -> nn.Module:
+    """Compile model with torch.compile when enabled in config."""
+    if not bool(cfg.get("train", {}).get("compile", False)):
+        return model
+    if not hasattr(torch, "compile"):
+        return model
+    mode = str(cfg.get("train", {}).get("compile_mode", "default"))
+    try:
+        return torch.compile(model, mode=mode)
+    except Exception as exc:
+        print(f"[train] torch.compile failed, fallback to eager mode: {exc}")
+        return model
 
 
 def _show_progress_bars() -> bool:
@@ -169,17 +227,23 @@ def _evaluate(
     loader: torch.utils.data.DataLoader,
     device: torch.device,
     threshold: float,
+    precision: str,
+    channels_last: bool,
 ) -> tuple[dict[str, float], np.ndarray, np.ndarray, list[str]]:
     """Run classification evaluation on one dataloader and return predictions."""
     model.eval()
     ys, ps = [], []
     file_names: list[str] = []
+    non_blocking = device.type == "cuda"
     with torch.no_grad():
         for batch in loader:
-            x = batch["image"].to(device)
-            y = batch["label"].to(device)
-            logit = model(x)
-            prob = torch.sigmoid(logit)
+            x = batch["image"].to(device, non_blocking=non_blocking)
+            if channels_last:
+                x = x.contiguous(memory_format=torch.channels_last)
+            y = batch["label"].to(device, non_blocking=non_blocking)
+            with _autocast_context(device, precision):
+                logit = model(x)
+                prob = torch.sigmoid(logit)
             ys.append(y.detach().cpu().numpy())
             ps.append(prob.detach().cpu().numpy())
             file_names.extend([str(x) for x in batch["file_name"]])
@@ -203,7 +267,14 @@ def _run_single_training(
 ) -> dict[str, Any]:
     """Train one model run (holdout fold, k-fold fold, or full-data run)."""
     base_lr = float(cfg["train"].get("lr", 2e-4))
+    precision = _resolve_precision(cfg, device)
+    channels_last = _use_channels_last(cfg, device)
+
     model = build_model(task="classification", model_cfg=cfg["model"]).to(device)
+    if channels_last:
+        model = model.to(memory_format=torch.channels_last)
+    model = _compile_model_if_enabled(cfg, model)
+
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=base_lr,
@@ -221,6 +292,8 @@ def _run_single_training(
         monitor = "f1"
         best_value = -np.inf
     best_outputs: tuple[np.ndarray, np.ndarray, list[str]] | None = None
+    non_blocking = device.type == "cuda"
+    scaler = torch.cuda.amp.GradScaler(enabled=(device.type == "cuda" and precision == "fp16"))
 
     for epoch in range(1, epochs + 1):
         lr = float(epoch_lrs[epoch - 1])
@@ -240,10 +313,16 @@ def _run_single_training(
             y = batch["label"].to(device)
 
             optimizer.zero_grad(set_to_none=True)
-            logit = model(x)
-            loss = loss_fn(logit, y)
-            loss.backward()
-            optimizer.step()
+            with _autocast_context(device, precision):
+                logit = model(x)
+                loss = loss_fn(logit, y)
+            if scaler.is_enabled():
+                scaler.scale(loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                loss.backward()
+                optimizer.step()
 
             running += float(loss.item()) * x.size(0)
             seen += x.size(0)
@@ -255,7 +334,14 @@ def _run_single_training(
             current = float(train_loss)
             improved = current < best_value
         else:
-            metrics, y_true, y_prob, file_names = _evaluate(model, val_loader, device, threshold=threshold)
+            metrics, y_true, y_prob, file_names = _evaluate(
+                model,
+                val_loader,
+                device,
+                threshold=threshold,
+                precision=precision,
+                channels_last=channels_last,
+            )
             metrics["train_loss"] = float(train_loss)
             metrics["lr"] = lr
             current = float(metrics["f1"])
@@ -338,6 +424,7 @@ def train(cfg: dict[str, Any]) -> dict[str, Any]:
 
     _set_seed(int(cfg.get("seed", 42)))
     device = _device_from_cfg(cfg)
+    _configure_runtime(cfg, device)
 
     output_dir = Path(cfg["train"].get("output_dir", "artifacts/checkpoints"))
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -548,9 +635,12 @@ def evaluate(cfg: dict[str, Any], ckpt_path: str) -> dict[str, float]:
         raise ValueError("Evaluation is not available when train.full_data=true.")
 
     device = _device_from_cfg(cfg)
+    _configure_runtime(cfg, device)
     mode = str(cfg.get("validation", {}).get("mode", "holdout")).lower()
     fold_index = int(cfg.get("validation", {}).get("fold_index", 0)) if mode == "kfold" else None
     threshold = _resolve_eval_threshold(cfg, mode)
+    precision = _resolve_precision(cfg, device)
+    channels_last = _use_channels_last(cfg, device)
 
     _, val_loader, _, _ = build_dataloaders(cfg, fold_index=fold_index)
     if val_loader is None:
@@ -559,6 +649,8 @@ def evaluate(cfg: dict[str, Any], ckpt_path: str) -> dict[str, float]:
     checkpoint = torch.load(ckpt_path, map_location=device)
     checkpoint_group = checkpoint.get("tracking_group")
     model = build_model(task="classification", model_cfg=cfg["model"]).to(device)
+    if channels_last:
+        model = model.to(memory_format=torch.channels_last)
     model.load_state_dict(checkpoint["state_dict"])
 
     metrics, y_true, y_prob, file_names = _evaluate(
@@ -566,6 +658,8 @@ def evaluate(cfg: dict[str, Any], ckpt_path: str) -> dict[str, float]:
         val_loader,
         device,
         threshold=threshold,
+        precision=precision,
+        channels_last=channels_last,
     )
     if mode == "kfold":
         metrics["fold"] = float(fold_index if fold_index is not None else 0)
@@ -604,24 +698,33 @@ def predict(cfg: dict[str, Any], ckpt_path: str, out_path: str, split: str = "va
         raise ValueError("Only classification task is supported.")
 
     device = _device_from_cfg(cfg)
+    _configure_runtime(cfg, device)
     mode = str(cfg.get("validation", {}).get("mode", "holdout")).lower()
     fold_index = int(cfg.get("validation", {}).get("fold_index", 0)) if mode == "kfold" else None
+    precision = _resolve_precision(cfg, device)
+    channels_last = _use_channels_last(cfg, device)
 
     loader = build_prediction_loader(cfg, split=split, fold_index=fold_index)
 
     checkpoint = torch.load(ckpt_path, map_location=device)
     checkpoint_group = checkpoint.get("tracking_group")
     model = build_model(task="classification", model_cfg=cfg["model"]).to(device)
+    if channels_last:
+        model = model.to(memory_format=torch.channels_last)
     model.load_state_dict(checkpoint["state_dict"])
     model.eval()
 
     threshold = _resolve_eval_threshold(cfg, mode)
     out_rows: list[dict[str, Any]] = []
+    non_blocking = device.type == "cuda"
 
     with torch.no_grad():
         for batch in loader:
-            x = batch["image"].to(device)
-            prob = torch.sigmoid(model(x)).detach().cpu().numpy()
+            x = batch["image"].to(device, non_blocking=non_blocking)
+            if channels_last:
+                x = x.contiguous(memory_format=torch.channels_last)
+            with _autocast_context(device, precision):
+                prob = torch.sigmoid(model(x)).detach().cpu().numpy()
 
             for i, file_name in enumerate(batch["file_name"]):
                 p = float(prob[i])

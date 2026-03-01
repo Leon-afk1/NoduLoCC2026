@@ -77,6 +77,10 @@ Config keys:
 - `train.loss.focal_gamma`, `train.loss.focal_alpha`, `train.loss.use_pos_weight`
 - `train.scheduler.name`: `none` or `cosine`
 - `train.scheduler.warmup_epochs`, `train.scheduler.min_lr`
+- `train.num_workers`, `train.pin_memory`, `train.persistent_workers`, `train.prefetch_factor`
+- `train.precision`: `fp32` / `bf16` / `fp16` (A100: `bf16` recommended)
+- `train.channels_last`, `train.cudnn_benchmark`, `train.tf32`, `train.matmul_precision`
+- `train.compile`, `train.compile_mode` (optional acceleration with `torch.compile`)
 - `eval.auto_threshold_search`: in `kfold`, compute best OOF threshold (F1) and save it to `artifacts/thresholds/`
 - `eval.use_oof_threshold`: in `kfold` eval/predict, load and use saved OOF threshold automatically
 
@@ -126,6 +130,17 @@ uv run python -m nodulocc.cli train --config configs/classification.yaml \
   --override train.scheduler.name=cosine \
   --override train.scheduler.warmup_epochs=1 \
   --override train.scheduler.min_lr=1e-5
+```
+
+### A100 speed-oriented example
+```bash
+uv run python -m nodulocc.cli train --config configs/classification.yaml \
+  --override train.batch_size=32 \
+  --override train.num_workers=12 \
+  --override train.precision=bf16 \
+  --override train.channels_last=true \
+  --override train.cudnn_benchmark=true \
+  --override train.tf32=true
 ```
 
 ## Notes
