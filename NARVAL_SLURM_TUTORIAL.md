@@ -91,6 +91,13 @@ use the `submit_and_sync.sh` script:
 ./submit_and_sync.sh
 ```
 
+Make shure it is executable:
+``` bash
+chmod +x submit_and_sync.sh
+```
+
+This script also fetch model weights from Hugging Face Hub so that they are available in offline mode on the compute node.
+
 ## 6) Useful Slurm commands
 
 ``` bash
@@ -140,6 +147,12 @@ After the job (on login node), synchronize:
 cd $SCRATCH/NoduLoCC2026
 source .venv/bin/activate
 wandb sync --sync-all
+```
+
+To provide the API key for synchronization, update bashrc with:
+``` bash
+export WANDB_API_KEY=your_api_key_here
+source ~/.bashrc
 ```
 
 ## 9) HPC best practices

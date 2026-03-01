@@ -41,7 +41,8 @@ def _build_backbone(name: str, pretrained: bool) -> nn.Module:
         return TinyBackbone()
     try:
         return timm.create_model(name, pretrained=pretrained, num_classes=0, global_pool="avg")
-    except Exception:
+    except Exception as exc:
+        print(f"[nodulocc] Falling back to tiny_cnn because loading '{name}' failed: {exc}")
         return TinyBackbone()
 
 

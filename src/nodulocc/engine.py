@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import json
 import re
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -41,6 +42,11 @@ def _set_seed(seed: int) -> None:
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
     np.random.seed(seed)
+
+
+def _show_progress_bars() -> bool:
+    """Enable tqdm bars only for interactive terminals."""
+    return bool(sys.stderr.isatty())
 
 
 def _classification_pos_weight(train_df: pd.DataFrame, device: torch.device) -> torch.Tensor:
@@ -224,7 +230,12 @@ def _run_single_training(
         running = 0.0
         seen = 0
 
-        for batch in tqdm(train_loader, desc=f"train-{log_prefix}-e{epoch}", leave=False):
+        for batch in tqdm(
+            train_loader,
+            desc=f"train-{log_prefix}-e{epoch}",
+            leave=False,
+            disable=not _show_progress_bars(),
+        ):
             x = batch["image"].to(device)
             y = batch["label"].to(device)
 
@@ -251,6 +262,19 @@ def _run_single_training(
             improved = current > best_value
 
         tracker.log({f"{log_prefix}/{k}": v for k, v in metrics.items()}, step=epoch)
+
+        if not _show_progress_bars():
+            if val_loader is None:
+                print(
+                    f"[{log_prefix}] epoch {epoch}/{epochs} train_loss={float(train_loss):.4f}"
+                )
+            else:
+                print(
+                    f"[{log_prefix}] epoch {epoch}/{epochs} "
+                    f"train_loss={float(train_loss):.4f} "
+                    f"f1={float(metrics.get('f1', 0.0)):.4f} "
+                    f"auc={float(metrics.get('roc_auc', 0.0)):.4f}"
+                )
 
         if improved:
             best_value = current

@@ -18,6 +18,11 @@ source .venv/bin/activate
 
 export PYTHONUNBUFFERED=1
 export OMP_NUM_THREADS=${SLURM_CPUS_PER_TASK}
+export HF_HOME="$SCRATCH/.cache/huggingface"
+export HUGGINGFACE_HUB_CACHE="$HF_HOME/hub"
+export TIMM_HOME="$SCRATCH/.cache/timm"
+export HF_HUB_OFFLINE=1
+mkdir -p "$HF_HOME" "$HUGGINGFACE_HUB_CACHE" "$TIMM_HOME"
 
 # Important sur Narval: W&B offline est plus sûr.
 export WANDB_MODE=offline
@@ -35,5 +40,6 @@ tar -xf nodulocc_dataset.tar
 echo "Dataset staged. Starting training..."
 # ---------------------------------------------------------------
 
+cd $SCRATCH/NoduLoCC2026
 srun python -m nodulocc.cli train --config configs/classification.yaml \
   --override data.dataset_root="$SLURM_TMPDIR/nodulocc_dataset"
