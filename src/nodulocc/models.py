@@ -72,4 +72,5 @@ def build_model(task: str, model_cfg: dict[str, Any]) -> nn.Module:
     backbone = str(model_cfg.get("backbone", "tiny_cnn"))
     pretrained = bool(model_cfg.get("pretrained", True))
     dropout = float(model_cfg.get("dropout", 0.0))
+    print(f"Building model with backbone={backbone}, pretrained={pretrained}, dropout={dropout}")
     return ClassificationModel(backbone_name=backbone, pretrained=pretrained, dropout=dropout)

@@ -293,6 +293,15 @@ def _run_single_training(
     loss_fn = _build_loss_fn(cfg, train_df, device)
     epoch_lrs = _build_epoch_lrs(cfg, epochs=epochs, base_lr=base_lr)
     threshold = float(cfg.get("eval", {}).get("threshold", 0.5))
+    early_cfg = cfg.get("train", {}).get("early_stopping", {})
+    early_enabled = bool(early_cfg.get("enabled", False))
+    early_patience = int(early_cfg.get("patience", 3))
+    early_min_delta = float(early_cfg.get("min_delta", 0.0))
+    early_start_epoch = int(early_cfg.get("start_epoch", 1))
+
+    if early_patience < 1:
+        early_enabled = False
+    early_start_epoch = max(1, early_start_epoch)
 
     if val_loader is None:
         monitor = "train_loss"
@@ -302,9 +311,13 @@ def _run_single_training(
         best_value = -np.inf
     best_outputs: tuple[np.ndarray, np.ndarray, list[str]] | None = None
     non_blocking = device.type == "cuda"
-    scaler = _build_grad_scaler(device, precision)
+    scaler = torch.cuda.amp.GradScaler(enabled=(device.type == "cuda" and precision == "fp16"))
+    no_improve_epochs = 0
+    stopped_early = False
+    last_epoch = 0
 
     for epoch in range(1, epochs + 1):
+        last_epoch = epoch
         lr = float(epoch_lrs[epoch - 1])
         _set_optimizer_lr(optimizer, lr)
 
@@ -341,7 +354,7 @@ def _run_single_training(
         if val_loader is None:
             metrics = {"train_loss": float(train_loss), "lr": lr}
             current = float(train_loss)
-            improved = current < best_value
+            improved = current < (best_value - early_min_delta)
         else:
             metrics, y_true, y_prob, file_names = _evaluate(
                 model,
@@ -354,7 +367,7 @@ def _run_single_training(
             metrics["train_loss"] = float(train_loss)
             metrics["lr"] = lr
             current = float(metrics["f1"])
-            improved = current > best_value
+            improved = current > (best_value + early_min_delta)
 
         tracker.log({f"{log_prefix}/{k}": v for k, v in metrics.items()}, step=epoch)
 
@@ -372,6 +385,7 @@ def _run_single_training(
                 )
 
         if improved:
+            no_improve_epochs = 0
             best_value = current
             if val_loader is not None:
                 best_outputs = (y_true, y_prob, file_names)
@@ -387,6 +401,16 @@ def _run_single_training(
                 },
                 ckpt_path,
             )
+        else:
+            no_improve_epochs += 1
+
+        if early_enabled and epoch >= early_start_epoch and no_improve_epochs >= early_patience:
+            stopped_early = True
+            print(
+                f"[{log_prefix}] Early stopping at epoch {epoch}/{epochs} "
+                f"(patience={early_patience}, min_delta={early_min_delta})."
+            )
+            break
 
     if best_outputs is not None:
         y_true, y_prob, file_names = best_outputs
@@ -416,6 +440,8 @@ def _run_single_training(
         "best_metric": float(best_value),
         "monitor": monitor,
         "_best_outputs": best_outputs,
+        "stopped_early": stopped_early,
+        "epochs_ran": int(last_epoch),
     }
 
 

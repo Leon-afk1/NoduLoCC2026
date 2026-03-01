@@ -4,7 +4,7 @@ set -euo pipefail
 cd "$SCRATCH/NoduLoCC2026"
 source .venv/bin/activate
 
-CONFIG_PATH="configs/classification.yaml"
+CONFIG_PATH="configs/classification_2.yaml"
 
 # Shared cache on scratch so login + GPU nodes see the same files.
 export HF_HOME="$SCRATCH/.cache/huggingface"
@@ -13,11 +13,13 @@ export TIMM_HOME="$SCRATCH/.cache/timm"
 mkdir -p "$HF_HOME" "$HUGGINGFACE_HUB_CACHE" "$TIMM_HOME"
 
 echo "Prefetching pretrained backbone (if enabled) from config: $CONFIG_PATH"
+export CONFIG_PATH
 python - <<'PY'
+import os
 from nodulocc.config import load_config
 import timm
 
-cfg = load_config("configs/classification.yaml")
+cfg = load_config(os.environ["CONFIG_PATH"])
 model_cfg = cfg.get("model", {})
 backbone = str(model_cfg.get("backbone", "tiny_cnn"))
 pretrained = bool(model_cfg.get("pretrained", True))

@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --account=def-zonata
 #SBATCH --job-name=nodulocc-train
-#SBATCH --time=0-06:00
+#SBATCH --time=0-15:00
 #SBATCH --gpus=a100:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=32G
@@ -41,5 +41,5 @@ echo "Dataset staged. Starting training..."
 # ---------------------------------------------------------------
 
 cd $SCRATCH/NoduLoCC2026
-srun python -m nodulocc.cli train --config configs/classification.yaml \
+srun python -m nodulocc.cli train --config configs/classification_2.yaml \
   --override data.dataset_root="$SLURM_TMPDIR/nodulocc_dataset"

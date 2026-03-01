@@ -52,6 +52,11 @@ train:
     name: cosine            # none | cosine
     warmup_epochs: 1
     min_lr: 0.00001
+  early_stopping:
+    enabled: false
+    patience: 3             # stop after N epochs without sufficient improvement
+    min_delta: 0.0          # minimum metric improvement to reset patience
+    start_epoch: 1          # earliest epoch where early stopping can trigger
   full_data: false    # true => train once on 100% data without validation
   output_dir: artifacts/checkpoints
 
