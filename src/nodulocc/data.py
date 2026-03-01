@@ -75,8 +75,10 @@ def _image_tfm(
         )
     ops.extend(
         [
+            # Use torchvision native transform instead of a local lambda so the
+            # dataset stays picklable with Python 3.14 forkserver workers.
+            transforms.Grayscale(num_output_channels=3),
             transforms.ToTensor(),
-            transforms.Lambda(lambda t: t.repeat(3, 1, 1)),
         ]
     )
     if normalization is not None:

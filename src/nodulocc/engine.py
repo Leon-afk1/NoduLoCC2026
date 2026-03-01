@@ -102,6 +102,15 @@ def _compile_model_if_enabled(cfg: dict[str, Any], model: nn.Module) -> nn.Modul
         return model
 
 
+def _build_grad_scaler(device: torch.device, precision: str) -> Any:
+    """Create a GradScaler with compatibility for old/new PyTorch APIs."""
+    enabled = device.type == "cuda" and precision == "fp16"
+    try:
+        return torch.amp.GradScaler("cuda", enabled=enabled)
+    except Exception:
+        return torch.cuda.amp.GradScaler(enabled=enabled)
+
+
 def _show_progress_bars() -> bool:
     """Enable tqdm bars only for interactive terminals."""
     return bool(sys.stderr.isatty())
@@ -293,7 +302,7 @@ def _run_single_training(
         best_value = -np.inf
     best_outputs: tuple[np.ndarray, np.ndarray, list[str]] | None = None
     non_blocking = device.type == "cuda"
-    scaler = torch.cuda.amp.GradScaler(enabled=(device.type == "cuda" and precision == "fp16"))
+    scaler = _build_grad_scaler(device, precision)
 
     for epoch in range(1, epochs + 1):
         lr = float(epoch_lrs[epoch - 1])
