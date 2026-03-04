@@ -1,0 +1,22 @@
+base_config: base.yaml
+task: classification
+
+validation:
+  mode: holdout
+  k: 5
+  fold_index: 0
+
+model:
+  backbone: convnext_tiny.in12k_ft_in1k
+
+train:
+  loss:
+    name: focal
+  img_size: 512
+  batch_size: 12
+  epochs: 12
+  use_weighted_sampler: true
+  full_data: false
+
+eval:
+  threshold: 0.5

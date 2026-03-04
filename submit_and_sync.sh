@@ -4,7 +4,7 @@ set -euo pipefail
 cd "$SCRATCH/NoduLoCC2026"
 source .venv/bin/activate
 
-CONFIG_PATH="configs/classification_2.yaml"
+CONFIG_PATH="configs/r1_b4_bce_posw.yaml"
 
 # Shared cache on scratch so login + GPU nodes see the same files.
 export HF_HOME="$SCRATCH/.cache/huggingface"

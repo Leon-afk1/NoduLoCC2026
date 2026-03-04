@@ -24,6 +24,26 @@ from .models import build_model
 from .tracking import Tracker
 
 
+class _NoOpGradScaler:
+    """Minimal scaler-compatible object used when AMP scaler is unavailable."""
+
+    @staticmethod
+    def is_enabled() -> bool:
+        return False
+
+    @staticmethod
+    def scale(loss: torch.Tensor) -> torch.Tensor:
+        return loss
+
+    @staticmethod
+    def step(optimizer: torch.optim.Optimizer) -> None:
+        optimizer.step()
+
+    @staticmethod
+    def update() -> None:
+        return None
+
+
 def _sanitize_artifact_name(value: str) -> str:
     """Convert arbitrary strings to artifact-safe names."""
     safe = re.sub(r"[^A-Za-z0-9_.-]+", "-", value.strip())
@@ -105,10 +125,16 @@ def _compile_model_if_enabled(cfg: dict[str, Any], model: nn.Module) -> nn.Modul
 def _build_grad_scaler(device: torch.device, precision: str) -> Any:
     """Create a GradScaler with compatibility for old/new PyTorch APIs."""
     enabled = device.type == "cuda" and precision == "fp16"
-    try:
-        return torch.amp.GradScaler("cuda", enabled=enabled)
-    except Exception:
-        return torch.cuda.amp.GradScaler(enabled=enabled)
+    if not enabled:
+        return _NoOpGradScaler()
+    if hasattr(torch, "amp") and hasattr(torch.amp, "GradScaler"):
+        return torch.amp.GradScaler("cuda", enabled=True)
+    return _NoOpGradScaler()
+
+
+def _to_numpy_float32(tensor: torch.Tensor) -> np.ndarray:
+    """Convert tensor to float32 numpy array (safe for bfloat16 tensors)."""
+    return tensor.detach().float().cpu().numpy()
 
 
 def _show_progress_bars() -> bool:
@@ -253,8 +279,8 @@ def _evaluate(
             with _autocast_context(device, precision):
                 logit = model(x)
                 prob = torch.sigmoid(logit)
-            ys.append(y.detach().cpu().numpy())
-            ps.append(prob.detach().cpu().numpy())
+            ys.append(_to_numpy_float32(y))
+            ps.append(_to_numpy_float32(prob))
             file_names.extend([str(x) for x in batch["file_name"]])
 
     y_true = np.concatenate(ys).astype(np.float32)
@@ -293,15 +319,6 @@ def _run_single_training(
     loss_fn = _build_loss_fn(cfg, train_df, device)
     epoch_lrs = _build_epoch_lrs(cfg, epochs=epochs, base_lr=base_lr)
     threshold = float(cfg.get("eval", {}).get("threshold", 0.5))
-    early_cfg = cfg.get("train", {}).get("early_stopping", {})
-    early_enabled = bool(early_cfg.get("enabled", False))
-    early_patience = int(early_cfg.get("patience", 3))
-    early_min_delta = float(early_cfg.get("min_delta", 0.0))
-    early_start_epoch = int(early_cfg.get("start_epoch", 1))
-
-    if early_patience < 1:
-        early_enabled = False
-    early_start_epoch = max(1, early_start_epoch)
 
     if val_loader is None:
         monitor = "train_loss"
@@ -311,13 +328,9 @@ def _run_single_training(
         best_value = -np.inf
     best_outputs: tuple[np.ndarray, np.ndarray, list[str]] | None = None
     non_blocking = device.type == "cuda"
-    scaler = torch.cuda.amp.GradScaler(enabled=(device.type == "cuda" and precision == "fp16"))
-    no_improve_epochs = 0
-    stopped_early = False
-    last_epoch = 0
+    scaler = _build_grad_scaler(device, precision)
 
     for epoch in range(1, epochs + 1):
-        last_epoch = epoch
         lr = float(epoch_lrs[epoch - 1])
         _set_optimizer_lr(optimizer, lr)
 
@@ -331,8 +344,10 @@ def _run_single_training(
             leave=False,
             disable=not _show_progress_bars(),
         ):
-            x = batch["image"].to(device)
-            y = batch["label"].to(device)
+            x = batch["image"].to(device, non_blocking=non_blocking)
+            if channels_last:
+                x = x.contiguous(memory_format=torch.channels_last)
+            y = batch["label"].to(device, non_blocking=non_blocking)
 
             optimizer.zero_grad(set_to_none=True)
             with _autocast_context(device, precision):
@@ -354,7 +369,7 @@ def _run_single_training(
         if val_loader is None:
             metrics = {"train_loss": float(train_loss), "lr": lr}
             current = float(train_loss)
-            improved = current < (best_value - early_min_delta)
+            improved = current < best_value
         else:
             metrics, y_true, y_prob, file_names = _evaluate(
                 model,
@@ -367,7 +382,7 @@ def _run_single_training(
             metrics["train_loss"] = float(train_loss)
             metrics["lr"] = lr
             current = float(metrics["f1"])
-            improved = current > (best_value + early_min_delta)
+            improved = current > best_value
 
         tracker.log({f"{log_prefix}/{k}": v for k, v in metrics.items()}, step=epoch)
 
@@ -381,11 +396,10 @@ def _run_single_training(
                     f"[{log_prefix}] epoch {epoch}/{epochs} "
                     f"train_loss={float(train_loss):.4f} "
                     f"f1={float(metrics.get('f1', 0.0)):.4f} "
-                    f"auc={float(metrics.get('roc_auc', 0.0)):.4f}"
+                    f"auc={float(metrics.get('auc', 0.0)):.4f}"
                 )
 
         if improved:
-            no_improve_epochs = 0
             best_value = current
             if val_loader is not None:
                 best_outputs = (y_true, y_prob, file_names)
@@ -401,16 +415,6 @@ def _run_single_training(
                 },
                 ckpt_path,
             )
-        else:
-            no_improve_epochs += 1
-
-        if early_enabled and epoch >= early_start_epoch and no_improve_epochs >= early_patience:
-            stopped_early = True
-            print(
-                f"[{log_prefix}] Early stopping at epoch {epoch}/{epochs} "
-                f"(patience={early_patience}, min_delta={early_min_delta})."
-            )
-            break
 
     if best_outputs is not None:
         y_true, y_prob, file_names = best_outputs
@@ -440,8 +444,6 @@ def _run_single_training(
         "best_metric": float(best_value),
         "monitor": monitor,
         "_best_outputs": best_outputs,
-        "stopped_early": stopped_early,
-        "epochs_ran": int(last_epoch),
     }
 
 
@@ -759,7 +761,7 @@ def predict(cfg: dict[str, Any], ckpt_path: str, out_path: str, split: str = "va
             if channels_last:
                 x = x.contiguous(memory_format=torch.channels_last)
             with _autocast_context(device, precision):
-                prob = torch.sigmoid(model(x)).detach().cpu().numpy()
+                prob = _to_numpy_float32(torch.sigmoid(model(x)))
 
             for i, file_name in enumerate(batch["file_name"]):
                 p = float(prob[i])

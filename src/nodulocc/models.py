@@ -14,7 +14,7 @@ import timm
 
 
 class TinyBackbone(nn.Module):
-    """Small fallback CNN used for tests and safe fallback when timm fails."""
+    """Small CNN used for tests and as explicit `tiny_cnn` backbone."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -36,14 +36,16 @@ class TinyBackbone(nn.Module):
 
 
 def _build_backbone(name: str, pretrained: bool) -> nn.Module:
-    """Build a backbone from `timm` or fallback to `TinyBackbone`."""
+    """Build a backbone from `timm` or explicit `tiny_cnn`."""
     if name == "tiny_cnn":
         return TinyBackbone()
     try:
         return timm.create_model(name, pretrained=pretrained, num_classes=0, global_pool="avg")
     except Exception as exc:
-        print(f"[nodulocc] Falling back to tiny_cnn because loading '{name}' failed: {exc}")
-        return TinyBackbone()
+        raise RuntimeError(
+            f"Failed to load backbone '{name}' with timm. "
+            "Use a valid timm model name or set backbone='tiny_cnn'."
+        ) from exc
 
 
 class ClassificationModel(nn.Module):

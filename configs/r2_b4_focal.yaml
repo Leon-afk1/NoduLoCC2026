@@ -1,0 +1,16 @@
+base_config: base.yaml
+task: classification
+
+model:
+  backbone: tf_efficientnet_b4.ns_jft_in1k
+
+train:
+  loss:
+    name: focal
+    focal_gamma: 2.0
+    focal_alpha: 0.25
+    use_pos_weight: false
+  output_dir: artifacts/checkpoints/r2_b4_focal
+
+tracking:
+  group: holdout_fastpass_b4
