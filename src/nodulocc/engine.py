@@ -685,7 +685,9 @@ def evaluate(cfg: dict[str, Any], ckpt_path: str) -> dict[str, float]:
 
     checkpoint = torch.load(ckpt_path, map_location=device)
     checkpoint_group = checkpoint.get("tracking_group")
-    model = build_model(task="classification", model_cfg=cfg["model"]).to(device)
+    model_cfg = copy.deepcopy(cfg["model"])
+    model_cfg["pretrained"] = False
+    model = build_model(task="classification", model_cfg=model_cfg).to(device)
     if channels_last:
         model = model.to(memory_format=torch.channels_last)
     model.load_state_dict(checkpoint["state_dict"])
@@ -745,7 +747,9 @@ def predict(cfg: dict[str, Any], ckpt_path: str, out_path: str, split: str = "va
 
     checkpoint = torch.load(ckpt_path, map_location=device)
     checkpoint_group = checkpoint.get("tracking_group")
-    model = build_model(task="classification", model_cfg=cfg["model"]).to(device)
+    model_cfg = copy.deepcopy(cfg["model"])
+    model_cfg["pretrained"] = False
+    model = build_model(task="classification", model_cfg=model_cfg).to(device)
     if channels_last:
         model = model.to(memory_format=torch.channels_last)
     model.load_state_dict(checkpoint["state_dict"])

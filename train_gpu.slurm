@@ -41,5 +41,5 @@ echo "Dataset staged. Starting training..."
 # ---------------------------------------------------------------
 
 cd $SCRATCH/NoduLoCC2026
-srun python -m nodulocc.cli train --config configs/r1_b4_bce_posw.yaml \
+srun python -m nodulocc.cli train --config configs/r3_b4_bce_no_posw.yaml \
   --override data.dataset_root="$SLURM_TMPDIR/nodulocc_dataset"
