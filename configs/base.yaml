@@ -6,6 +6,11 @@ data:
   classification:
     labels_csv: classification_labels.csv
     images_subdir: nih_filtered_images
+  preprocessing:
+    clahe:
+      enabled: false
+      clip_limit: 2.0
+      tile_grid_size: 8
   normalization:
     enabled: true
     mean: [0.485, 0.456, 0.406]

@@ -128,7 +128,10 @@ def _build_grad_scaler(device: torch.device, precision: str) -> Any:
     if not enabled:
         return _NoOpGradScaler()
     if hasattr(torch, "amp") and hasattr(torch.amp, "GradScaler"):
-        return torch.amp.GradScaler("cuda", enabled=True)
+        try:
+            return torch.amp.GradScaler("cuda", enabled=True)
+        except Exception:
+            return _NoOpGradScaler()
     return _NoOpGradScaler()
 
 

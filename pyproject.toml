@@ -22,6 +22,7 @@ dependencies = [
 
 [project.optional-dependencies]
 exp = ["wandb", "optuna"]
+cv = ["opencv-python-headless"]
 
 [project.scripts]
 nodulocc = "nodulocc.cli:main"

@@ -19,6 +19,11 @@ Optional experiment tools:
 uv sync --extra exp
 ```
 
+Optional preprocessing dependency (for CLAHE):
+```bash
+uv sync --extra cv
+```
+
 ## Weights & Biases login
 If you want online experiment tracking, login once before training:
 ```bash
@@ -73,6 +78,7 @@ Config keys:
 
 ## Training knobs
 - `data.normalization`: input normalization (`enabled`, `mean`, `std`)
+- `data.preprocessing.clahe`: CLAHE preprocessing (`enabled`, `clip_limit`, `tile_grid_size`)
 - `train.loss.name`: `bce` or `focal`
 - `train.loss.focal_gamma`, `train.loss.focal_alpha`, `train.loss.use_pos_weight`
 - `train.scheduler.name`: `none` or `cosine`
@@ -141,6 +147,14 @@ uv run python -m nodulocc.cli train --config configs/classification.yaml \
   --override train.channels_last=true \
   --override train.cudnn_benchmark=true \
   --override train.tf32=true
+```
+
+### Enable CLAHE
+```bash
+uv run python -m nodulocc.cli train --config configs/classification.yaml \
+  --override data.preprocessing.clahe.enabled=true \
+  --override data.preprocessing.clahe.clip_limit=2.0 \
+  --override data.preprocessing.clahe.tile_grid_size=8
 ```
 
 ## Notes

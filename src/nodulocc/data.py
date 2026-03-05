@@ -18,6 +18,11 @@ from sklearn.model_selection import StratifiedKFold, train_test_split
 from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
 from torchvision import transforms
 
+try:
+    import cv2
+except Exception:  # pragma: no cover - optional dependency, handled at runtime.
+    cv2 = None
+
 
 LABEL_MAP = {"No Finding": 0, "Nodule": 1}
 
@@ -59,13 +64,69 @@ def _normalization_stats(cfg: dict[str, Any]) -> tuple[list[float], list[float]]
     return [float(x) for x in mean], [float(x) for x in std]
 
 
+def _clahe_settings(cfg: dict[str, Any]) -> tuple[float, int] | None:
+    """Return CLAHE settings from config or None when disabled.
+
+    Expected config block:
+    data:
+      preprocessing:
+        clahe:
+          enabled: false
+          clip_limit: 2.0
+          tile_grid_size: 8
+    """
+    clahe_cfg = cfg.get("data", {}).get("preprocessing", {}).get("clahe", {})
+    if not bool(clahe_cfg.get("enabled", False)):
+        return None
+
+    clip_limit = float(clahe_cfg.get("clip_limit", 2.0))
+    tile_grid_size = int(clahe_cfg.get("tile_grid_size", 8))
+    if clip_limit <= 0:
+        raise ValueError("data.preprocessing.clahe.clip_limit must be > 0")
+    if tile_grid_size < 1:
+        raise ValueError("data.preprocessing.clahe.tile_grid_size must be >= 1")
+    return clip_limit, tile_grid_size
+
+
+class CLAHETransform:
+    """Apply OpenCV CLAHE on a grayscale PIL image.
+
+    This transform is intentionally implemented as a top-level class so it
+    remains picklable with dataloader multiprocessing.
+    """
+
+    def __init__(self, clip_limit: float, tile_grid_size: int) -> None:
+        self.clip_limit = float(clip_limit)
+        self.tile_grid_size = int(tile_grid_size)
+
+    def __call__(self, img: Image.Image) -> Image.Image:
+        if cv2 is None:
+            raise RuntimeError(
+                "CLAHE is enabled but OpenCV is not installed. "
+                "Install it with: uv sync --extra cv"
+            )
+
+        gray = img if img.mode == "L" else img.convert("L")
+        arr = np.asarray(gray, dtype=np.uint8)
+        clahe = cv2.createCLAHE(
+            clipLimit=self.clip_limit,
+            tileGridSize=(self.tile_grid_size, self.tile_grid_size),
+        )
+        out = clahe.apply(arr)
+        return Image.fromarray(out, mode="L")
+
+
 def _image_tfm(
     img_size: int,
     train: bool,
     normalization: tuple[list[float], list[float]] | None,
+    clahe: tuple[float, int] | None,
 ) -> transforms.Compose:
     """Build image transforms for classification."""
     ops: list[Any] = [transforms.Resize((img_size, img_size))]
+    if clahe is not None:
+        clip_limit, tile_grid_size = clahe
+        ops.append(CLAHETransform(clip_limit=clip_limit, tile_grid_size=tile_grid_size))
     if train:
         ops.extend(
             [
@@ -237,6 +298,7 @@ class ClassificationDataset(Dataset):
         img_size: int,
         train: bool,
         normalization: tuple[list[float], list[float]] | None,
+        clahe: tuple[float, int] | None,
     ) -> None:
         """Store metadata and build per-split transforms.
 
@@ -247,7 +309,7 @@ class ClassificationDataset(Dataset):
         self._image_paths = self.df["image_path"].astype(str).tolist()
         self._file_names = self.df["file_name"].astype(str).tolist()
         self._labels = self.df["label"].astype(np.float32).to_numpy()
-        self.tfm = _image_tfm(img_size=img_size, train=train, normalization=normalization)
+        self.tfm = _image_tfm(img_size=img_size, train=train, normalization=normalization, clahe=clahe)
 
     def __len__(self) -> int:
         return len(self.df)
@@ -302,12 +364,13 @@ def build_dataloaders(
     workers = int(cfg["train"].get("num_workers", 8))
     img_size = int(cfg["train"].get("img_size", 512))
     normalization = _normalization_stats(cfg)
+    clahe = _clahe_settings(cfg)
     pin_memory = bool(cfg["train"].get("pin_memory", torch.cuda.is_available()))
     persistent_workers = bool(cfg["train"].get("persistent_workers", True))
     prefetch_factor = int(cfg["train"].get("prefetch_factor", 4))
     drop_last_train = bool(cfg["train"].get("drop_last_train", False))
 
-    train_ds = ClassificationDataset(train_df, img_size=img_size, train=True, normalization=normalization)
+    train_ds = ClassificationDataset(train_df, img_size=img_size, train=True, normalization=normalization, clahe=clahe)
     sampler = None
     if bool(cfg["train"].get("use_weighted_sampler", True)):
         sampler = _classification_sampler(train_df)
@@ -329,7 +392,7 @@ def build_dataloaders(
     if val_df is None:
         return train_loader, None, train_df, None
 
-    val_ds = ClassificationDataset(val_df, img_size=img_size, train=False, normalization=normalization)
+    val_ds = ClassificationDataset(val_df, img_size=img_size, train=False, normalization=normalization, clahe=clahe)
     val_loader_kwargs: dict[str, Any] = {
         "dataset": val_ds,
         "batch_size": batch_size,
@@ -354,6 +417,7 @@ def build_prediction_loader(
     workers = int(cfg["train"].get("num_workers", 8))
     batch_size = int(cfg["train"]["batch_size"])
     normalization = _normalization_stats(cfg)
+    clahe = _clahe_settings(cfg)
     pin_memory = bool(cfg["train"].get("pin_memory", torch.cuda.is_available()))
     persistent_workers = bool(cfg["train"].get("persistent_workers", True))
     prefetch_factor = int(cfg["train"].get("prefetch_factor", 4))
@@ -373,7 +437,7 @@ def build_prediction_loader(
             if df is None:
                 raise ValueError("No validation split available in full-data mode")
 
-    ds = ClassificationDataset(df, img_size=img_size, train=False, normalization=normalization)
+    ds = ClassificationDataset(df, img_size=img_size, train=False, normalization=normalization, clahe=clahe)
     pred_loader_kwargs: dict[str, Any] = {
         "dataset": ds,
         "batch_size": batch_size,
