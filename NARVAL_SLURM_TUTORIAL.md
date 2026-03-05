@@ -55,7 +55,7 @@ module load python/3.14.2 # adapt to what "module avail python" shows
 python -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
-pip install -e .[exp]
+pip install -e ".[exp,cv]"
 ```
 
 ## 4) Quick check before batch
