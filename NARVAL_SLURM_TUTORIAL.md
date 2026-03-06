@@ -51,11 +51,23 @@ tar -cf nodulocc_dataset.tar nodulocc_dataset/
 
 ``` bash
 cd $SCRATCH/NoduLoCC2026
+module load StdEnv/2023
 module load python/3.14.2 # adapt to what "module avail python" shows
 python -m venv .venv
+
+# Optional but required if you plan to enable CLAHE (OpenCV):
+# IMPORTANT: load OpenCV module BEFORE activating the virtual env.
+module spider opencv
+module load gcc opencv/<VERSION>
+
 source .venv/bin/activate
 python -m pip install --upgrade pip
 pip install -e ".[exp,cv]"
+```
+
+If you do not use CLAHE, you can install only:
+``` bash
+pip install -e .[exp]
 ```
 
 ## 4) Quick check before batch
@@ -97,6 +109,16 @@ chmod +x submit_and_sync.sh
 ```
 
 This script also fetch model weights from Hugging Face Hub so that they are available in offline mode on the compute node.
+
+If CLAHE is enabled in config (`data.preprocessing.clahe.enabled=true`),
+also load OpenCV in the Slurm job script before activating the venv:
+
+``` bash
+module load StdEnv/2023
+module load python/3.14.2
+module load gcc opencv/<VERSION>
+source .venv/bin/activate
+```
 
 ## 6) Useful Slurm commands
 

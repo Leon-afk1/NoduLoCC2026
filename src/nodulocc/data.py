@@ -18,6 +18,8 @@ from sklearn.model_selection import StratifiedKFold, train_test_split
 from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
 from torchvision import transforms
 
+from .preprocess_profiles import TeamV2Preprocessor, TeamV2Settings
+
 try:
     import cv2
 except Exception:  # pragma: no cover - optional dependency, handled at runtime.
@@ -39,6 +41,73 @@ def _load_image(path: Path) -> Image.Image:
         if img.mode != "L":
             return img.convert("L")
         return img.copy()
+
+
+def _classification_dirs(cfg: dict[str, Any], root: Path) -> dict[str, Path]:
+    """Return source-to-directory mapping for classification images.
+
+    Preferred config:
+    data:
+      classification:
+        nih_images_subdir: nih_filtered_images
+        lidc_images_subdir: lidc_png_16_bit
+
+    Legacy fallback:
+    data:
+      classification:
+        images_subdir: nih_filtered_images
+    """
+    cls_cfg = cfg.get("data", {}).get("classification", {})
+    nih_subdir = cls_cfg.get("nih_images_subdir")
+    lidc_subdir = cls_cfg.get("lidc_images_subdir")
+    if isinstance(nih_subdir, str) and isinstance(lidc_subdir, str):
+        return {
+            "NIH": _resolve(root, nih_subdir),
+            "LIDC": _resolve(root, lidc_subdir),
+        }
+
+    legacy_subdir = cls_cfg.get("images_subdir")
+    if not isinstance(legacy_subdir, str):
+        raise ValueError(
+            "Missing classification image directory config. "
+            "Set `data.classification.images_subdir` or both "
+            "`data.classification.nih_images_subdir` and "
+            "`data.classification.lidc_images_subdir`."
+        )
+    legacy_dir = _resolve(root, legacy_subdir)
+    return {"NIH": legacy_dir, "LIDC": legacy_dir}
+
+
+def _resolve_image_paths_by_source(df: pd.DataFrame, source_dirs: dict[str, Path]) -> pd.Series:
+    """Resolve image paths using source-aware routing with recursive fallback.
+
+    The fast path assumes flat directories (`dir / file_name`). If files are
+    nested, we lazily build a recursive filename index for missing rows.
+    """
+    image_path = pd.Series(index=df.index, dtype=object)
+    file_names = df["file_name"].astype(str)
+    sources = df["source"].astype(str)
+
+    for source_name, source_dir in source_dirs.items():
+        mask = sources == source_name
+        if not bool(mask.any()):
+            continue
+
+        default_paths = file_names[mask].map(lambda x: str(source_dir / x))
+        exists_default = default_paths.map(lambda x: Path(x).is_file())
+        resolved = default_paths.copy()
+
+        if bool((~exists_default).any()):
+            # Build index only when needed to keep startup fast.
+            recursive_index: dict[str, str] = {}
+            for p in source_dir.rglob("*.png"):
+                recursive_index.setdefault(p.name, str(p))
+            fallback = file_names[mask].map(recursive_index.get)
+            resolved = resolved.where(exists_default, fallback)
+
+        image_path.loc[mask] = resolved
+
+    return image_path
 
 
 def _normalization_stats(cfg: dict[str, Any]) -> tuple[list[float], list[float]] | None:
@@ -64,6 +133,60 @@ def _normalization_stats(cfg: dict[str, Any]) -> tuple[list[float], list[float]]
     return [float(x) for x in mean], [float(x) for x in std]
 
 
+def _split_stratify_mode(cfg: dict[str, Any]) -> str:
+    """Return split stratification mode: `label` or `source_label`."""
+    mode = str(cfg.get("data", {}).get("split_stratify", "source_label")).lower()
+    if mode not in {"label", "source_label"}:
+        raise ValueError("data.split_stratify must be one of: label, source_label")
+    return mode
+
+
+def _lidc_train_only(cfg: dict[str, Any]) -> bool:
+    """Whether LIDC samples must be forced into train split only."""
+    return bool(cfg.get("data", {}).get("classification", {}).get("lidc_train_only", False))
+
+
+def _split_cache_suffix(cfg: dict[str, Any]) -> str:
+    """Build a split-cache suffix that encodes split semantics."""
+    strat = _split_stratify_mode(cfg)
+    lidc_flag = int(_lidc_train_only(cfg))
+    return f"strat-{strat}_lidc-train-{lidc_flag}"
+
+
+def _split_targets(df: pd.DataFrame, cfg: dict[str, Any]) -> np.ndarray:
+    """Build stratification targets according to configured split strategy."""
+    mode = _split_stratify_mode(cfg)
+    if mode == "label":
+        return df["label"].astype(str).to_numpy()
+    if "source" not in df.columns:
+        raise ValueError("`source` column is required for data.split_stratify=source_label")
+    return (df["source"].astype(str) + "_" + df["label"].astype(str)).to_numpy()
+
+
+def _split_pool_indices(df: pd.DataFrame, cfg: dict[str, Any]) -> tuple[np.ndarray, np.ndarray]:
+    """Return `(split_pool_idx, always_train_idx)` according to split policy."""
+    all_idx = np.arange(len(df), dtype=np.int64)
+    if not _lidc_train_only(cfg):
+        return all_idx, np.array([], dtype=np.int64)
+    if "source" not in df.columns:
+        raise ValueError("`source` column is required for data.classification.lidc_train_only=true")
+
+    source_values = df["source"].astype(str).to_numpy()
+    always_train_idx = np.where(source_values == "LIDC")[0].astype(np.int64)
+    split_pool_idx = np.where(source_values != "LIDC")[0].astype(np.int64)
+    if len(split_pool_idx) == 0:
+        raise ValueError("No non-LIDC samples available for validation split.")
+    return split_pool_idx, always_train_idx
+
+
+def _preprocessing_profile(cfg: dict[str, Any]) -> str:
+    """Return selected preprocessing profile."""
+    profile = str(cfg.get("data", {}).get("preprocessing", {}).get("profile", "v1")).lower()
+    if profile not in {"v1", "team_v2"}:
+        raise ValueError("data.preprocessing.profile must be one of: v1, team_v2")
+    return profile
+
+
 def _clahe_settings(cfg: dict[str, Any]) -> tuple[float, int] | None:
     """Return CLAHE settings from config or None when disabled.
 
@@ -75,6 +198,9 @@ def _clahe_settings(cfg: dict[str, Any]) -> tuple[float, int] | None:
           clip_limit: 2.0
           tile_grid_size: 8
     """
+    if _preprocessing_profile(cfg) != "v1":
+        return None
+
     clahe_cfg = cfg.get("data", {}).get("preprocessing", {}).get("clahe", {})
     if not bool(clahe_cfg.get("enabled", False)):
         return None
@@ -156,7 +282,7 @@ def load_classification_dataframe(cfg: dict[str, Any]) -> pd.DataFrame:
     """
     root = Path(cfg["data"]["dataset_root"]).resolve()
     labels_path = _resolve(root, cfg["data"]["classification"]["labels_csv"])
-    images_dir = _resolve(root, cfg["data"]["classification"]["images_subdir"])
+    source_dirs = _classification_dirs(cfg, root)
 
     df = pd.read_csv(labels_path)
     required = {"file_name", "label", "LIDC_ID"}
@@ -168,8 +294,10 @@ def load_classification_dataframe(cfg: dict[str, Any]) -> pd.DataFrame:
     if df["label"].isna().any():
         raise ValueError("Unknown labels found in classification CSV")
 
-    df["image_path"] = df["file_name"].astype(str).map(lambda x: str(images_dir / x))
-    exists = df["image_path"].map(lambda x: Path(x).is_file())
+    # Source routing: LIDC rows (has LIDC_ID) map to LIDC directory.
+    df["source"] = np.where(df["LIDC_ID"].notna(), "LIDC", "NIH")
+    df["image_path"] = _resolve_image_paths_by_source(df, source_dirs)
+    exists = df["image_path"].map(lambda x: isinstance(x, str) and Path(x).is_file())
     df = df[exists].reset_index(drop=True)
     df["label"] = df["label"].astype(np.int64)
     return df
@@ -192,12 +320,14 @@ def _split_dir(cfg: dict[str, Any]) -> Path:
 
 def _holdout_split_file(cfg: dict[str, Any]) -> Path:
     """Return split file path used for reproducible holdout split."""
-    return _split_dir(cfg) / f"classification_holdout_seed{int(cfg.get('seed', 42))}.json"
+    suffix = _split_cache_suffix(cfg)
+    return _split_dir(cfg) / f"classification_holdout_seed{int(cfg.get('seed', 42))}_{suffix}.json"
 
 
 def _kfold_split_file(cfg: dict[str, Any], k: int) -> Path:
     """Return split file path used for reproducible k-fold split."""
-    return _split_dir(cfg) / f"classification_kfold_k{k}_seed{int(cfg.get('seed', 42))}.json"
+    suffix = _split_cache_suffix(cfg)
+    return _split_dir(cfg) / f"classification_kfold_k{k}_seed{int(cfg.get('seed', 42))}_{suffix}.json"
 
 
 def _holdout_indices(df: pd.DataFrame, cfg: dict[str, Any]) -> tuple[np.ndarray, np.ndarray]:
@@ -209,13 +339,18 @@ def _holdout_indices(df: pd.DataFrame, cfg: dict[str, Any]) -> tuple[np.ndarray,
         payload = json.loads(split_path.read_text())
         return np.array(payload["train_idx"], dtype=np.int64), np.array(payload["val_idx"], dtype=np.int64)
 
-    indices = np.arange(len(df), dtype=np.int64)
+    split_pool_idx, always_train_idx = _split_pool_indices(df, cfg)
+    split_pool_df = df.iloc[split_pool_idx].reset_index(drop=True)
+    split_targets = _split_targets(split_pool_df, cfg)
+
     train_idx, val_idx = train_test_split(
-        indices,
+        split_pool_idx,
         test_size=val_size,
         random_state=int(cfg.get("seed", 42)),
-        stratify=df["label"],
+        stratify=split_targets,
     )
+    if len(always_train_idx) > 0:
+        train_idx = np.concatenate([train_idx, always_train_idx]).astype(np.int64)
     split_path.write_text(
         json.dumps(
             {
@@ -247,13 +382,17 @@ def _kfold_indices(df: pd.DataFrame, cfg: dict[str, Any], k: int) -> list[tuple[
         return folds
 
     skf = StratifiedKFold(n_splits=k, shuffle=True, random_state=int(cfg.get("seed", 42)))
-    labels = df["label"].to_numpy(dtype=np.int64)
+    split_pool_idx, always_train_idx = _split_pool_indices(df, cfg)
+    split_pool_df = df.iloc[split_pool_idx].reset_index(drop=True)
+    split_targets = _split_targets(split_pool_df, cfg)
 
     folds: list[tuple[np.ndarray, np.ndarray]] = []
     serializable: list[dict[str, list[int]]] = []
-    for train_idx, val_idx in skf.split(np.arange(len(df)), labels):
-        train_idx = train_idx.astype(np.int64)
-        val_idx = val_idx.astype(np.int64)
+    for train_pos, val_pos in skf.split(np.arange(len(split_pool_idx)), split_targets):
+        train_idx = split_pool_idx[train_pos].astype(np.int64)
+        val_idx = split_pool_idx[val_pos].astype(np.int64)
+        if len(always_train_idx) > 0:
+            train_idx = np.concatenate([train_idx, always_train_idx]).astype(np.int64)
         folds.append((train_idx, val_idx))
         serializable.append(
             {
@@ -299,6 +438,8 @@ class ClassificationDataset(Dataset):
         train: bool,
         normalization: tuple[list[float], list[float]] | None,
         clahe: tuple[float, int] | None,
+        preprocessing_profile: str,
+        cfg: dict[str, Any],
     ) -> None:
         """Store metadata and build per-split transforms.
 
@@ -309,17 +450,44 @@ class ClassificationDataset(Dataset):
         self._image_paths = self.df["image_path"].astype(str).tolist()
         self._file_names = self.df["file_name"].astype(str).tolist()
         self._labels = self.df["label"].astype(np.float32).to_numpy()
-        self.tfm = _image_tfm(img_size=img_size, train=train, normalization=normalization, clahe=clahe)
+        self._preprocessing_profile = preprocessing_profile
+        if preprocessing_profile == "team_v2":
+            self._team_v2_preprocessor = TeamV2Preprocessor(
+                img_size=img_size,
+                normalization=normalization,
+                settings=TeamV2Settings.from_cfg(cfg),
+            )
+            self._tensor_aug = (
+                transforms.Compose(
+                    [
+                        transforms.RandomHorizontalFlip(p=0.5),
+                        transforms.ColorJitter(brightness=0.06, contrast=0.1),
+                    ]
+                )
+                if train
+                else None
+            )
+            self.tfm = None
+        else:
+            self._team_v2_preprocessor = None
+            self._tensor_aug = None
+            self.tfm = _image_tfm(img_size=img_size, train=train, normalization=normalization, clahe=clahe)
 
     def __len__(self) -> int:
         return len(self.df)
 
     def __getitem__(self, idx: int) -> dict[str, Any]:
         """Return one sample with image tensor and binary label."""
-        img = _load_image(Path(self._image_paths[idx]))
+        if self._team_v2_preprocessor is not None:
+            image = self._team_v2_preprocessor(Path(self._image_paths[idx]))
+            if self._tensor_aug is not None:
+                image = self._tensor_aug(image)
+        else:
+            img = _load_image(Path(self._image_paths[idx]))
+            image = self.tfm(img)
 
         return {
-            "image": self.tfm(img),
+            "image": image,
             "label": torch.tensor(float(self._labels[idx]), dtype=torch.float32),
             "file_name": self._file_names[idx],
         }
@@ -364,13 +532,22 @@ def build_dataloaders(
     workers = int(cfg["train"].get("num_workers", 8))
     img_size = int(cfg["train"].get("img_size", 512))
     normalization = _normalization_stats(cfg)
+    preprocessing_profile = _preprocessing_profile(cfg)
     clahe = _clahe_settings(cfg)
     pin_memory = bool(cfg["train"].get("pin_memory", torch.cuda.is_available()))
     persistent_workers = bool(cfg["train"].get("persistent_workers", True))
     prefetch_factor = int(cfg["train"].get("prefetch_factor", 4))
     drop_last_train = bool(cfg["train"].get("drop_last_train", False))
 
-    train_ds = ClassificationDataset(train_df, img_size=img_size, train=True, normalization=normalization, clahe=clahe)
+    train_ds = ClassificationDataset(
+        train_df,
+        img_size=img_size,
+        train=True,
+        normalization=normalization,
+        clahe=clahe,
+        preprocessing_profile=preprocessing_profile,
+        cfg=cfg,
+    )
     sampler = None
     if bool(cfg["train"].get("use_weighted_sampler", True)):
         sampler = _classification_sampler(train_df)
@@ -392,7 +569,15 @@ def build_dataloaders(
     if val_df is None:
         return train_loader, None, train_df, None
 
-    val_ds = ClassificationDataset(val_df, img_size=img_size, train=False, normalization=normalization, clahe=clahe)
+    val_ds = ClassificationDataset(
+        val_df,
+        img_size=img_size,
+        train=False,
+        normalization=normalization,
+        clahe=clahe,
+        preprocessing_profile=preprocessing_profile,
+        cfg=cfg,
+    )
     val_loader_kwargs: dict[str, Any] = {
         "dataset": val_ds,
         "batch_size": batch_size,
@@ -417,6 +602,7 @@ def build_prediction_loader(
     workers = int(cfg["train"].get("num_workers", 8))
     batch_size = int(cfg["train"]["batch_size"])
     normalization = _normalization_stats(cfg)
+    preprocessing_profile = _preprocessing_profile(cfg)
     clahe = _clahe_settings(cfg)
     pin_memory = bool(cfg["train"].get("pin_memory", torch.cuda.is_available()))
     persistent_workers = bool(cfg["train"].get("persistent_workers", True))
@@ -437,7 +623,15 @@ def build_prediction_loader(
             if df is None:
                 raise ValueError("No validation split available in full-data mode")
 
-    ds = ClassificationDataset(df, img_size=img_size, train=False, normalization=normalization, clahe=clahe)
+    ds = ClassificationDataset(
+        df,
+        img_size=img_size,
+        train=False,
+        normalization=normalization,
+        clahe=clahe,
+        preprocessing_profile=preprocessing_profile,
+        cfg=cfg,
+    )
     pred_loader_kwargs: dict[str, Any] = {
         "dataset": ds,
         "batch_size": batch_size,

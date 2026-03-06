@@ -329,11 +329,23 @@ def _run_single_training(
     else:
         monitor = "f1"
         best_value = -np.inf
+
+    es_cfg = cfg.get("train", {}).get("early_stopping", {})
+    es_enabled = bool(es_cfg.get("enabled", False))
+    es_patience = max(1, int(es_cfg.get("patience", 4)))
+    es_min_delta = max(0.0, float(es_cfg.get("min_delta", 0.0)))
+    es_start_epoch = max(1, int(es_cfg.get("start_epoch", 1)))
+    es_wait = 0
+
     best_outputs: tuple[np.ndarray, np.ndarray, list[str]] | None = None
+    best_epoch = 0
+    epochs_ran = 0
+    stopped_early = False
     non_blocking = device.type == "cuda"
     scaler = _build_grad_scaler(device, precision)
 
     for epoch in range(1, epochs + 1):
+        epochs_ran = epoch
         lr = float(epoch_lrs[epoch - 1])
         _set_optimizer_lr(optimizer, lr)
 
@@ -372,7 +384,7 @@ def _run_single_training(
         if val_loader is None:
             metrics = {"train_loss": float(train_loss), "lr": lr}
             current = float(train_loss)
-            improved = current < best_value
+            improved = current < (best_value - es_min_delta)
         else:
             metrics, y_true, y_prob, file_names = _evaluate(
                 model,
@@ -385,7 +397,7 @@ def _run_single_training(
             metrics["train_loss"] = float(train_loss)
             metrics["lr"] = lr
             current = float(metrics["f1"])
-            improved = current > best_value
+            improved = current > (best_value + es_min_delta)
 
         tracker.log({f"{log_prefix}/{k}": v for k, v in metrics.items()}, step=epoch)
 
@@ -404,6 +416,8 @@ def _run_single_training(
 
         if improved:
             best_value = current
+            best_epoch = epoch
+            es_wait = 0
             if val_loader is not None:
                 best_outputs = (y_true, y_prob, file_names)
             torch.save(
@@ -418,6 +432,16 @@ def _run_single_training(
                 },
                 ckpt_path,
             )
+        elif es_enabled and epoch >= es_start_epoch:
+            es_wait += 1
+            if es_wait >= es_patience:
+                stopped_early = True
+                if not _show_progress_bars():
+                    print(
+                        f"[{log_prefix}] early stopping at epoch {epoch}/{epochs} "
+                        f"(best_epoch={best_epoch}, monitor={monitor}, best={float(best_value):.4f})"
+                    )
+                break
 
     if best_outputs is not None:
         y_true, y_prob, file_names = best_outputs
@@ -446,6 +470,9 @@ def _run_single_training(
         "checkpoint": str(ckpt_path),
         "best_metric": float(best_value),
         "monitor": monitor,
+        "best_epoch": int(best_epoch),
+        "epochs_ran": int(epochs_ran),
+        "stopped_early": bool(stopped_early),
         "_best_outputs": best_outputs,
     }
 
@@ -507,6 +534,9 @@ def train(cfg: dict[str, Any]) -> dict[str, Any]:
             "checkpoint": run["checkpoint"],
             "best_metric": run["best_metric"],
             "monitor": run["monitor"],
+            "best_epoch": run["best_epoch"],
+            "epochs_ran": run["epochs_ran"],
+            "stopped_early": run["stopped_early"],
             "train_seconds": float(elapsed),
         }
 
@@ -536,6 +566,9 @@ def train(cfg: dict[str, Any]) -> dict[str, Any]:
                     "fold": fold_idx,
                     "checkpoint": run["checkpoint"],
                     "f1": run["best_metric"],
+                    "best_epoch": run["best_epoch"],
+                    "epochs_ran": run["epochs_ran"],
+                    "stopped_early": run["stopped_early"],
                 }
             )
             best_outputs = run.get("_best_outputs")
@@ -659,6 +692,9 @@ def train(cfg: dict[str, Any]) -> dict[str, Any]:
         "checkpoint": run["checkpoint"],
         "best_metric": run["best_metric"],
         "monitor": run["monitor"],
+        "best_epoch": run["best_epoch"],
+        "epochs_ran": run["epochs_ran"],
+        "stopped_early": run["stopped_early"],
         "train_seconds": float(elapsed),
     }
 

@@ -77,8 +77,13 @@ Config keys:
 - `train.full_data`: `true` to train on 100% data (no validation)
 
 ## Training knobs
+- `data.classification.nih_images_subdir` / `data.classification.lidc_images_subdir`: source-aware routing for NIH/LIDC files
+- `data.classification.lidc_train_only`: keep LIDC rows in train only (validation on NIH only)
+- `data.split_stratify`: split strategy (`label` or `source_label`)
+- `data.preprocessing.profile`: preprocessing profile (`v1` or `team_v2`)
+- `data.preprocessing.team_v2.*`: EDA-inspired robust pipeline (percentile norm, thorax mask, optional CLAHE, blur, resize+reflect pad)
 - `data.normalization`: input normalization (`enabled`, `mean`, `std`)
-- `data.preprocessing.clahe`: CLAHE preprocessing (`enabled`, `clip_limit`, `tile_grid_size`)
+- `data.preprocessing.clahe`: CLAHE option for legacy `v1` profile (`enabled`, `clip_limit`, `tile_grid_size`)
 - `train.loss.name`: `bce` or `focal`
 - `train.loss.focal_gamma`, `train.loss.focal_alpha`, `train.loss.use_pos_weight`
 - `train.scheduler.name`: `none` or `cosine`
@@ -87,6 +92,7 @@ Config keys:
 - `train.precision`: `fp32` / `bf16` / `fp16` (A100: `bf16` recommended)
 - `train.channels_last`, `train.cudnn_benchmark`, `train.tf32`, `train.matmul_precision`
 - `train.compile`, `train.compile_mode` (optional acceleration with `torch.compile`)
+- `train.early_stopping.enabled`, `train.early_stopping.patience`, `train.early_stopping.min_delta`, `train.early_stopping.start_epoch`
 - `eval.auto_threshold_search`: in `kfold`, compute best OOF threshold (F1) and save it to `artifacts/thresholds/`
 - `eval.use_oof_threshold`: in `kfold` eval/predict, load and use saved OOF threshold automatically
 
@@ -157,6 +163,14 @@ uv run python -m nodulocc.cli train --config configs/classification.yaml \
   --override data.preprocessing.clahe.tile_grid_size=8
 ```
 
+### Enable Team Preprocessing V2
+```bash
+uv run python -m nodulocc.cli train --config configs/classification.yaml \
+  --override data.preprocessing.profile=team_v2 \
+  --override data.preprocessing.team_v2.use_clahe=true \
+  --override data.preprocessing.team_v2.use_thorax_mask=true
+```
+
 ## Notes
 - Split indices are cached in `artifacts/splits/` for reproducibility.
-- Classification uses `nih_filtered_images`.
+- Classification can route from both NIH and LIDC image folders.

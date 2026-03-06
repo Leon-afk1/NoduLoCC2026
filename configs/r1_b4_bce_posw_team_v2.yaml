@@ -1,0 +1,13 @@
+base_config: r1_b4_bce_posw.yaml
+task: classification
+
+data:
+  preprocessing:
+    profile: team_v2
+    team_v2:
+      use_thorax_mask: true
+      use_clahe: true
+
+tracking:
+  group: holdout_fastpass_b4_team_v2
+

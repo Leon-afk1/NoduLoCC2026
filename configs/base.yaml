@@ -3,14 +3,31 @@ task: classification
 
 data:
   dataset_root: ../nodulocc_dataset
+  split_stratify: source_label  # label | source_label
   classification:
     labels_csv: classification_labels.csv
-    images_subdir: nih_filtered_images
+    images_subdir: nih_filtered_images  # legacy fallback (single-directory mode)
+    nih_images_subdir: nih_filtered_images
+    lidc_images_subdir: lidc_png_16_bit
+    lidc_train_only: false  # true => keep LIDC samples in train only (never in val)
   preprocessing:
+    profile: v1   # v1 | team_v2
     clahe:
       enabled: false
       clip_limit: 2.0
       tile_grid_size: 8
+    team_v2:
+      clip_percentiles: [1.0, 99.0]
+      use_thorax_mask: true
+      thorax_margin: 0.97
+      thorax_blur: 51
+      use_clahe: true
+      clahe_clip_limit: 2.0
+      clahe_tile_grid_size: 8
+      use_gaussian_blur: true
+      gaussian_kernel_size: 3
+      gaussian_sigma: 0.5
+      resize_interpolation: area  # area | linear
   normalization:
     enabled: true
     mean: [0.485, 0.456, 0.406]
