@@ -1,0 +1,24 @@
+# Requirements pour le projet NoduLoCC2026
+# Détection et localisation de nodules pulmonaires
+
+# PyTorch et vision
+torch>=2.0.0
+torchvision>=0.15.0
+
+# Data processing
+numpy>=1.24.0
+pandas>=2.0.0
+Pillow>=9.5.0
+
+# Machine learning utilities
+scikit-learn>=1.3.0
+
+# Visualization (optionnel pour notebooks)
+matplotlib>=3.7.0
+seaborn>=0.12.0
+
+# Progress bars
+tqdm>=4.65.0
+
+# SLURM/HPC (si nécessaire)
+# Aucune dépendance supplémentaire requise
