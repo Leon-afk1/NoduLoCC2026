@@ -214,6 +214,79 @@ def _clahe_settings(cfg: dict[str, Any]) -> tuple[float, int] | None:
     return clip_limit, tile_grid_size
 
 
+def _augmentation_settings(cfg: dict[str, Any]) -> dict[str, Any]:
+    """Return train-time augmentation settings.
+
+    Expected config block:
+    data:
+      augmentation:
+        horizontal_flip_p: 0.5
+        color_jitter:
+          enabled: true
+          brightness: 0.06
+          contrast: 0.10
+          saturation: 0.0
+          hue: 0.0
+    """
+    aug_cfg = cfg.get("data", {}).get("augmentation", {})
+    horizontal_flip_p = float(aug_cfg.get("horizontal_flip_p", 0.5))
+    if horizontal_flip_p < 0.0 or horizontal_flip_p > 1.0:
+        raise ValueError("data.augmentation.horizontal_flip_p must be in [0, 1]")
+
+    jitter_cfg = aug_cfg.get("color_jitter", {})
+    enabled = bool(jitter_cfg.get("enabled", True))
+    brightness = float(jitter_cfg.get("brightness", 0.06))
+    contrast = float(jitter_cfg.get("contrast", 0.10))
+    saturation = float(jitter_cfg.get("saturation", 0.0))
+    hue = float(jitter_cfg.get("hue", 0.0))
+
+    for key, value in {
+        "brightness": brightness,
+        "contrast": contrast,
+        "saturation": saturation,
+    }.items():
+        if value < 0.0:
+            raise ValueError(f"data.augmentation.color_jitter.{key} must be >= 0")
+    if hue < 0.0 or hue > 0.5:
+        raise ValueError("data.augmentation.color_jitter.hue must be in [0, 0.5]")
+
+    return {
+        "horizontal_flip_p": horizontal_flip_p,
+        "color_jitter_enabled": enabled,
+        "color_jitter_brightness": brightness,
+        "color_jitter_contrast": contrast,
+        "color_jitter_saturation": saturation,
+        "color_jitter_hue": hue,
+    }
+
+
+def _build_train_augment_ops(augmentation_settings: dict[str, Any]) -> list[Any]:
+    """Build train-time augmentation operations for PIL images or tensors."""
+    ops: list[Any] = []
+    hflip_p = float(augmentation_settings["horizontal_flip_p"])
+    if hflip_p > 0.0:
+        ops.append(transforms.RandomHorizontalFlip(p=hflip_p))
+
+    if bool(augmentation_settings["color_jitter_enabled"]):
+        ops.append(
+            transforms.ColorJitter(
+                brightness=float(augmentation_settings["color_jitter_brightness"]),
+                contrast=float(augmentation_settings["color_jitter_contrast"]),
+                saturation=float(augmentation_settings["color_jitter_saturation"]),
+                hue=float(augmentation_settings["color_jitter_hue"]),
+            )
+        )
+    return ops
+
+
+def _normalization_transform(normalization: tuple[list[float], list[float]] | None) -> transforms.Normalize | None:
+    """Return torchvision normalization transform when normalization is enabled."""
+    if normalization is None:
+        return None
+    mean, std = normalization
+    return transforms.Normalize(mean=mean, std=std)
+
+
 class CLAHETransform:
     """Apply OpenCV CLAHE on a grayscale PIL image.
 
@@ -247,6 +320,7 @@ def _image_tfm(
     train: bool,
     normalization: tuple[list[float], list[float]] | None,
     clahe: tuple[float, int] | None,
+    augmentation_settings: dict[str, Any],
 ) -> transforms.Compose:
     """Build image transforms for classification."""
     ops: list[Any] = [transforms.Resize((img_size, img_size))]
@@ -254,12 +328,7 @@ def _image_tfm(
         clip_limit, tile_grid_size = clahe
         ops.append(CLAHETransform(clip_limit=clip_limit, tile_grid_size=tile_grid_size))
     if train:
-        ops.extend(
-            [
-                transforms.RandomHorizontalFlip(p=0.5),
-                transforms.ColorJitter(brightness=0.06, contrast=0.1),
-            ]
-        )
+        ops.extend(_build_train_augment_ops(augmentation_settings))
     ops.extend(
         [
             # Use torchvision native transform instead of a local lambda so the
@@ -268,9 +337,9 @@ def _image_tfm(
             transforms.ToTensor(),
         ]
     )
-    if normalization is not None:
-        mean, std = normalization
-        ops.append(transforms.Normalize(mean=mean, std=std))
+    normalize = _normalization_transform(normalization)
+    if normalize is not None:
+        ops.append(normalize)
     return transforms.Compose(ops)
 
 
@@ -438,6 +507,7 @@ class ClassificationDataset(Dataset):
         train: bool,
         normalization: tuple[list[float], list[float]] | None,
         clahe: tuple[float, int] | None,
+        augmentation_settings: dict[str, Any],
         preprocessing_profile: str,
         cfg: dict[str, Any],
     ) -> None:
@@ -451,27 +521,25 @@ class ClassificationDataset(Dataset):
         self._file_names = self.df["file_name"].astype(str).tolist()
         self._labels = self.df["label"].astype(np.float32).to_numpy()
         self._preprocessing_profile = preprocessing_profile
+        self._normalize = _normalization_transform(normalization)
         if preprocessing_profile == "team_v2":
             self._team_v2_preprocessor = TeamV2Preprocessor(
                 img_size=img_size,
-                normalization=normalization,
                 settings=TeamV2Settings.from_cfg(cfg),
             )
-            self._tensor_aug = (
-                transforms.Compose(
-                    [
-                        transforms.RandomHorizontalFlip(p=0.5),
-                        transforms.ColorJitter(brightness=0.06, contrast=0.1),
-                    ]
-                )
-                if train
-                else None
-            )
+            train_aug_ops = _build_train_augment_ops(augmentation_settings) if train else []
+            self._tensor_aug = transforms.Compose(train_aug_ops) if len(train_aug_ops) > 0 else None
             self.tfm = None
         else:
             self._team_v2_preprocessor = None
             self._tensor_aug = None
-            self.tfm = _image_tfm(img_size=img_size, train=train, normalization=normalization, clahe=clahe)
+            self.tfm = _image_tfm(
+                img_size=img_size,
+                train=train,
+                normalization=normalization,
+                clahe=clahe,
+                augmentation_settings=augmentation_settings,
+            )
 
     def __len__(self) -> int:
         return len(self.df)
@@ -482,6 +550,8 @@ class ClassificationDataset(Dataset):
             image = self._team_v2_preprocessor(Path(self._image_paths[idx]))
             if self._tensor_aug is not None:
                 image = self._tensor_aug(image)
+            if self._normalize is not None:
+                image = self._normalize(image)
         else:
             img = _load_image(Path(self._image_paths[idx]))
             image = self.tfm(img)
@@ -532,6 +602,7 @@ def build_dataloaders(
     workers = int(cfg["train"].get("num_workers", 8))
     img_size = int(cfg["train"].get("img_size", 512))
     normalization = _normalization_stats(cfg)
+    augmentation_settings = _augmentation_settings(cfg)
     preprocessing_profile = _preprocessing_profile(cfg)
     clahe = _clahe_settings(cfg)
     pin_memory = bool(cfg["train"].get("pin_memory", torch.cuda.is_available()))
@@ -545,6 +616,7 @@ def build_dataloaders(
         train=True,
         normalization=normalization,
         clahe=clahe,
+        augmentation_settings=augmentation_settings,
         preprocessing_profile=preprocessing_profile,
         cfg=cfg,
     )
@@ -575,6 +647,7 @@ def build_dataloaders(
         train=False,
         normalization=normalization,
         clahe=clahe,
+        augmentation_settings=augmentation_settings,
         preprocessing_profile=preprocessing_profile,
         cfg=cfg,
     )
@@ -602,6 +675,7 @@ def build_prediction_loader(
     workers = int(cfg["train"].get("num_workers", 8))
     batch_size = int(cfg["train"]["batch_size"])
     normalization = _normalization_stats(cfg)
+    augmentation_settings = _augmentation_settings(cfg)
     preprocessing_profile = _preprocessing_profile(cfg)
     clahe = _clahe_settings(cfg)
     pin_memory = bool(cfg["train"].get("pin_memory", torch.cuda.is_available()))
@@ -629,6 +703,7 @@ def build_prediction_loader(
         train=False,
         normalization=normalization,
         clahe=clahe,
+        augmentation_settings=augmentation_settings,
         preprocessing_profile=preprocessing_profile,
         cfg=cfg,
     )

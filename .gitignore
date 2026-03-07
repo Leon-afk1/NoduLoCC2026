@@ -8,3 +8,4 @@ checkpoints/
 wandb/
 *.egg-info/
 *.out
+runs/

@@ -83,6 +83,8 @@ Config keys:
 - `data.preprocessing.profile`: preprocessing profile (`v1` or `team_v2`)
 - `data.preprocessing.team_v2.*`: EDA-inspired robust pipeline (percentile norm, thorax mask, optional CLAHE, blur, resize+reflect pad)
 - `data.normalization`: input normalization (`enabled`, `mean`, `std`)
+- `data.augmentation.horizontal_flip_p`: train-time horizontal flip probability
+- `data.augmentation.color_jitter.*`: train-time color jitter (`enabled`, `brightness`, `contrast`, `saturation`, `hue`)
 - `data.preprocessing.clahe`: CLAHE option for legacy `v1` profile (`enabled`, `clip_limit`, `tile_grid_size`)
 - `train.loss.name`: `bce` or `focal`
 - `train.loss.focal_gamma`, `train.loss.focal_alpha`, `train.loss.use_pos_weight`
@@ -168,7 +170,17 @@ uv run python -m nodulocc.cli train --config configs/classification.yaml \
 uv run python -m nodulocc.cli train --config configs/classification.yaml \
   --override data.preprocessing.profile=team_v2 \
   --override data.preprocessing.team_v2.use_clahe=true \
-  --override data.preprocessing.team_v2.use_thorax_mask=true
+  --override data.preprocessing.team_v2.use_thorax_mask=true \
+  --override data.augmentation.color_jitter.enabled=false
+```
+
+### Preview preprocessing samples (NIH + LIDC)
+```bash
+uv run python -m nodulocc.preview_preprocessing \
+  --config configs/r1_b4_bce_posw_team_v2_no_double_comp.yaml \
+  --out-dir artifacts/preprocess_preview \
+  --n-per-source 6 \
+  --display-size 256
 ```
 
 ## Notes

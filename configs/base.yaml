@@ -28,6 +28,14 @@ data:
       gaussian_kernel_size: 3
       gaussian_sigma: 0.5
       resize_interpolation: area  # area | linear
+  augmentation:
+    horizontal_flip_p: 0.5
+    color_jitter:
+      enabled: true
+      brightness: 0.06
+      contrast: 0.10
+      saturation: 0.0
+      hue: 0.0
   normalization:
     enabled: true
     mean: [0.485, 0.456, 0.406]

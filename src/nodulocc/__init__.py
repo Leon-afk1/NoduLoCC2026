@@ -8,5 +8,6 @@ __all__ = [
     "hpo",
     "metrics",
     "models",
+    "preview_preprocessing",
     "tracking",
 ]

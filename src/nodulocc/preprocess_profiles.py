@@ -88,17 +88,19 @@ class TeamV2Preprocessor:
     6) optional light Gaussian blur
     7) resize with aspect-ratio preserving reflection padding
     8) map to tensor in [0, 1], grayscale replicated to 3 channels
-    9) optional ImageNet normalization
+
+    Note:
+    - This preprocessor intentionally does not apply train-time augmentation.
+    - It also does not normalize outputs; normalization is applied downstream
+      so augmentation order can stay: preprocess -> augment -> normalize.
     """
 
     def __init__(
         self,
         img_size: int,
-        normalization: tuple[list[float], list[float]] | None,
         settings: TeamV2Settings,
     ) -> None:
         self.img_size = int(img_size)
-        self.normalization = normalization
         self.settings = settings
 
     @staticmethod
@@ -183,11 +185,4 @@ class TeamV2Preprocessor:
         img_u8 = self._resize_with_padding(img_u8)
         tensor = torch.from_numpy(img_u8.astype(np.float32) / 255.0).unsqueeze(0).repeat(3, 1, 1)
 
-        if self.normalization is not None:
-            mean, std = self.normalization
-            mean_t = torch.tensor(mean, dtype=tensor.dtype).view(3, 1, 1)
-            std_t = torch.tensor(std, dtype=tensor.dtype).view(3, 1, 1)
-            tensor = (tensor - mean_t) / std_t
-
         return tensor
-

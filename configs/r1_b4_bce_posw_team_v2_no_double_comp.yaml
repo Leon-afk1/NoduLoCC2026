@@ -1,0 +1,24 @@
+base_config: r1_b4_bce_posw.yaml
+task: classification
+
+data:
+  preprocessing:
+    profile: team_v2
+    team_v2:
+      use_thorax_mask: true
+      use_clahe: true
+  augmentation:
+    color_jitter:
+      enabled: false
+
+train:
+  epochs: 12
+  # Keep only one class-imbalance compensation path:
+  # BCE `pos_weight` remains enabled from base config.
+  use_weighted_sampler: false
+
+eval:
+  threshold: 0.65
+
+tracking:
+  group: holdout_fastpass_b4_team_v2_no_double_comp
