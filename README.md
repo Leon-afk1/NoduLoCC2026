@@ -78,6 +78,7 @@ Config keys:
 
 ## Training knobs
 - `data.classification.nih_images_subdir` / `data.classification.lidc_images_subdir`: source-aware routing for NIH/LIDC files
+- `data.classification.localization_csv`: optional localization priors (x/y) used by MIL train sampling
 - `data.classification.lidc_train_only`: keep LIDC rows in train only (validation on NIH only)
 - `data.split_stratify`: split strategy (`label` or `source_label`)
 - `data.preprocessing.profile`: preprocessing profile (`v1` or `team_v2`)
@@ -95,6 +96,8 @@ Config keys:
 - `train.channels_last`, `train.cudnn_benchmark`, `train.tf32`, `train.matmul_precision`
 - `train.compile`, `train.compile_mode` (optional acceleration with `torch.compile`)
 - `train.early_stopping.enabled`, `train.early_stopping.patience`, `train.early_stopping.min_delta`, `train.early_stopping.start_epoch`
+- `model.type`: `global` (full-image) or `mil_patch` (bag of patches)
+- `model.mil.*`: MIL patch extraction + attention pooling settings (`num_patches`, `patch_size`, `min_scale`, `max_scale`, `attention_hidden`, `use_localization_priors`, `positive_patch_prob`, `localization_jitter`)
 - `eval.auto_threshold_search`: in `kfold`, compute best OOF threshold (F1) and save it to `artifacts/thresholds/`
 - `eval.use_oof_threshold`: in `kfold` eval/predict, load and use saved OOF threshold automatically
 
@@ -173,6 +176,14 @@ uv run python -m nodulocc.cli train --config configs/classification.yaml \
   --override data.preprocessing.team_v2.use_thorax_mask=true \
   --override data.augmentation.color_jitter.enabled=false
 ```
+
+### MIL Patch-Based Training (new method)
+```bash
+uv run python -m nodulocc.cli train --config configs/r1_b4_mil_patch_team_v2.yaml
+```
+Notes:
+- `model.mil.use_localization_priors=true` only biases patch sampling during **training** on positive images.
+- Eval/predict do not use localization labels.
 
 ### Preview preprocessing samples (NIH + LIDC)
 ```bash

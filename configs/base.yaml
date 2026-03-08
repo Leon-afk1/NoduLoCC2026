@@ -6,6 +6,7 @@ data:
   split_stratify: source_label  # label | source_label
   classification:
     labels_csv: classification_labels.csv
+    localization_csv: localization_labels.csv
     images_subdir: nih_filtered_images  # legacy fallback (single-directory mode)
     nih_images_subdir: nih_filtered_images
     lidc_images_subdir: lidc_png_16_bit
@@ -49,9 +50,19 @@ validation:
   fold_index: 0       # used by eval/predict in kfold mode
 
 model:
+  type: global   # global | mil_patch
   backbone: tf_efficientnet_b0.ns_jft_in1k
   pretrained: true
   dropout: 0.1
+  mil:
+    num_patches: 16
+    patch_size: 160
+    min_scale: 0.9
+    max_scale: 1.8
+    attention_hidden: 256
+    use_localization_priors: true
+    positive_patch_prob: 0.7
+    localization_jitter: 0.05
 
 train:
   device: auto

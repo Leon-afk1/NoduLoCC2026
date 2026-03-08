@@ -1,0 +1,25 @@
+base_config: r1_b4_bce_posw_team_v2_no_double_comp.yaml
+task: classification
+
+model:
+  type: mil_patch
+  backbone: tf_efficientnet_b4.ns_jft_in1k
+  mil:
+    num_patches: 16
+    patch_size: 160
+    min_scale: 0.9
+    max_scale: 1.8
+    attention_hidden: 256
+    use_localization_priors: true
+    positive_patch_prob: 0.7
+    localization_jitter: 0.05
+
+train:
+  batch_size: 6
+  output_dir: artifacts/checkpoints/r1_b4_mil_patch_team_v2
+
+eval:
+  threshold: 0.5
+
+tracking:
+  group: holdout_fastpass_b4_team_v2_mil

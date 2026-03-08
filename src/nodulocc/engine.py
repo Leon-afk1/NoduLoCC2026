@@ -140,6 +140,19 @@ def _to_numpy_float32(tensor: torch.Tensor) -> np.ndarray:
     return tensor.detach().float().cpu().numpy()
 
 
+def _prepare_batch_input(
+    batch: dict[str, Any],
+    device: torch.device,
+    non_blocking: bool,
+    channels_last: bool,
+) -> torch.Tensor:
+    """Move input batch tensor to device and apply optional memory layout."""
+    x = batch["image"].to(device, non_blocking=non_blocking)
+    if channels_last and x.ndim == 4:
+        x = x.contiguous(memory_format=torch.channels_last)
+    return x
+
+
 def _show_progress_bars() -> bool:
     """Enable tqdm bars only for interactive terminals."""
     return bool(sys.stderr.isatty())
@@ -275,9 +288,7 @@ def _evaluate(
     non_blocking = device.type == "cuda"
     with torch.no_grad():
         for batch in loader:
-            x = batch["image"].to(device, non_blocking=non_blocking)
-            if channels_last:
-                x = x.contiguous(memory_format=torch.channels_last)
+            x = _prepare_batch_input(batch, device=device, non_blocking=non_blocking, channels_last=channels_last)
             y = batch["label"].to(device, non_blocking=non_blocking)
             with _autocast_context(device, precision):
                 logit = model(x)
@@ -359,9 +370,7 @@ def _run_single_training(
             leave=False,
             disable=not _show_progress_bars(),
         ):
-            x = batch["image"].to(device, non_blocking=non_blocking)
-            if channels_last:
-                x = x.contiguous(memory_format=torch.channels_last)
+            x = _prepare_batch_input(batch, device=device, non_blocking=non_blocking, channels_last=channels_last)
             y = batch["label"].to(device, non_blocking=non_blocking)
 
             optimizer.zero_grad(set_to_none=True)
@@ -800,9 +809,7 @@ def predict(cfg: dict[str, Any], ckpt_path: str, out_path: str, split: str = "va
 
     with torch.no_grad():
         for batch in loader:
-            x = batch["image"].to(device, non_blocking=non_blocking)
-            if channels_last:
-                x = x.contiguous(memory_format=torch.channels_last)
+            x = _prepare_batch_input(batch, device=device, non_blocking=non_blocking, channels_last=channels_last)
             with _autocast_context(device, precision):
                 prob = _to_numpy_float32(torch.sigmoid(model(x)))
 
