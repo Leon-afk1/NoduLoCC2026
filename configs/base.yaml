@@ -63,6 +63,12 @@ model:
     use_localization_priors: true
     positive_patch_prob: 0.7
     localization_jitter: 0.05
+    sampling_mode: guided     # guided | random
+    candidate_grid: 9         # number of candidate points per axis for guided mode
+    topk_fraction: 0.35       # keep top X% informative candidates
+    train_explore_prob: 0.2   # in train, fallback to random thorax sampling with this probability
+    guided_jitter: 0.02       # positional jitter around guided centers (normalized coordinates)
+    score_kernel_size: 21     # odd kernel size for local variance map
 
 train:
   device: auto

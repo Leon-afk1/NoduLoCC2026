@@ -153,6 +153,12 @@ def _mil_settings(cfg: dict[str, Any]) -> dict[str, Any]:
     use_loc = bool(mil_cfg.get("use_localization_priors", True))
     pos_patch_prob = float(mil_cfg.get("positive_patch_prob", 0.7))
     loc_jitter = float(mil_cfg.get("localization_jitter", 0.05))
+    sampling_mode = str(mil_cfg.get("sampling_mode", "guided")).lower()
+    candidate_grid = int(mil_cfg.get("candidate_grid", 9))
+    topk_fraction = float(mil_cfg.get("topk_fraction", 0.35))
+    train_explore_prob = float(mil_cfg.get("train_explore_prob", 0.2))
+    guided_jitter = float(mil_cfg.get("guided_jitter", 0.02))
+    score_kernel_size = int(mil_cfg.get("score_kernel_size", 21))
 
     if num_patches < 1:
         raise ValueError("model.mil.num_patches must be >= 1")
@@ -164,6 +170,20 @@ def _mil_settings(cfg: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("model.mil.positive_patch_prob must be in [0, 1]")
     if loc_jitter < 0.0:
         raise ValueError("model.mil.localization_jitter must be >= 0")
+    if sampling_mode not in {"guided", "random"}:
+        raise ValueError("model.mil.sampling_mode must be one of: guided, random")
+    if candidate_grid < 3:
+        raise ValueError("model.mil.candidate_grid must be >= 3")
+    if topk_fraction <= 0.0 or topk_fraction > 1.0:
+        raise ValueError("model.mil.topk_fraction must be in (0, 1]")
+    if train_explore_prob < 0.0 or train_explore_prob > 1.0:
+        raise ValueError("model.mil.train_explore_prob must be in [0, 1]")
+    if guided_jitter < 0.0:
+        raise ValueError("model.mil.guided_jitter must be >= 0")
+    if score_kernel_size < 3:
+        raise ValueError("model.mil.score_kernel_size must be >= 3")
+    if score_kernel_size % 2 == 0:
+        score_kernel_size += 1
 
     return {
         "num_patches": num_patches,
@@ -173,6 +193,12 @@ def _mil_settings(cfg: dict[str, Any]) -> dict[str, Any]:
         "use_localization_priors": use_loc,
         "positive_patch_prob": pos_patch_prob,
         "localization_jitter": loc_jitter,
+        "sampling_mode": sampling_mode,
+        "candidate_grid": candidate_grid,
+        "topk_fraction": topk_fraction,
+        "train_explore_prob": train_explore_prob,
+        "guided_jitter": guided_jitter,
+        "score_kernel_size": score_kernel_size,
     }
 
 
@@ -665,6 +691,21 @@ class MilPatchDataset(Dataset):
         self._max_scale = float(self._mil["max_scale"])
         self._positive_patch_prob = float(self._mil["positive_patch_prob"])
         self._localization_jitter = float(self._mil["localization_jitter"])
+        self._sampling_mode = str(self._mil["sampling_mode"])
+        self._candidate_grid = int(self._mil["candidate_grid"])
+        self._topk_fraction = float(self._mil["topk_fraction"])
+        self._train_explore_prob = float(self._mil["train_explore_prob"])
+        self._guided_jitter = float(self._mil["guided_jitter"])
+        self._score_kernel_size = int(self._mil["score_kernel_size"])
+        self._eval_scale = float(0.5 * (self._min_scale + self._max_scale))
+        self._normalization = normalization
+        if normalization is not None:
+            mean, std = normalization
+            self._norm_mean_t = torch.tensor(mean, dtype=torch.float32).view(3, 1, 1)
+            self._norm_std_t = torch.tensor(std, dtype=torch.float32).view(3, 1, 1)
+        else:
+            self._norm_mean_t = None
+            self._norm_std_t = None
 
         # Reuse existing full-image preprocessing/augmentation pipeline.
         self._base_ds = ClassificationDataset(
@@ -735,6 +776,41 @@ class MilPatchDataset(Dataset):
         mixed = (self._seed * 1664525 + int(idx) * 1013904223 + key) % (2**32)
         return np.random.default_rng(mixed)
 
+    def _score_view(self, image: torch.Tensor) -> torch.Tensor:
+        """Build [H,W] view in [0,1] used for guided patch scoring."""
+        x = image.detach().float().cpu()
+        if self._norm_mean_t is not None and self._norm_std_t is not None:
+            x = x * self._norm_std_t + self._norm_mean_t
+        x = x.clamp(0.0, 1.0)
+        return x.mean(dim=0)
+
+    def _guided_candidate_centers(self, image: torch.Tensor) -> list[tuple[float, float, float]]:
+        """Compute candidate centers ranked by local variance score."""
+        gray = self._score_view(image)
+        k = int(self._score_kernel_size)
+        mean = F.avg_pool2d(gray.unsqueeze(0).unsqueeze(0), kernel_size=k, stride=1, padding=k // 2)
+        mean2 = F.avg_pool2d((gray * gray).unsqueeze(0).unsqueeze(0), kernel_size=k, stride=1, padding=k // 2)
+        var_map = torch.clamp(mean2 - mean * mean, min=0.0).squeeze(0).squeeze(0)
+        h, w = int(var_map.shape[0]), int(var_map.shape[1])
+
+        xs = np.linspace(0.08, 0.92, self._candidate_grid, dtype=np.float32)
+        ys = np.linspace(0.08, 0.92, self._candidate_grid, dtype=np.float32)
+        candidates: list[tuple[float, float, float]] = []
+        for y in ys:
+            for x in xs:
+                in_ellipse = (((float(x) - 0.5) / 0.45) ** 2 + ((float(y) - 0.5) / 0.45) ** 2) <= 1.0
+                if not in_ellipse:
+                    continue
+                px = int(round(float(x) * (w - 1)))
+                py = int(round(float(y) * (h - 1)))
+                score = float(var_map[py, px].item())
+                candidates.append((float(x), float(y), score))
+
+        if not candidates:
+            return [(0.5, 0.5, 0.0)]
+        candidates.sort(key=lambda t: t[2], reverse=True)
+        return candidates
+
     def _extract_patch(
         self,
         image: torch.Tensor,
@@ -762,11 +838,12 @@ class MilPatchDataset(Dataset):
     def _sample_patch_centers(
         self,
         *,
+        image: torch.Tensor,
         label: float,
         file_name: str,
         rng: np.random.Generator,
     ) -> list[tuple[float, float]]:
-        """Sample patch centers, optionally biased by localization priors on train positives."""
+        """Sample patch centers with guided or random strategy plus optional localization prior."""
         centers: list[tuple[float, float]] = []
 
         loc_points = self._loc_norm_by_file.get(file_name, [])
@@ -775,6 +852,31 @@ class MilPatchDataset(Dataset):
             x = float(np.clip(x0 + rng.normal(0.0, self._localization_jitter), 0.0, 1.0))
             y = float(np.clip(y0 + rng.normal(0.0, self._localization_jitter), 0.0, 1.0))
             centers.append((x, y))
+
+        if self._sampling_mode == "guided":
+            candidates = self._guided_candidate_centers(image)
+            top_n = max(1, int(round(len(candidates) * self._topk_fraction)))
+            top_candidates = candidates[:top_n]
+
+            if self._train:
+                while len(centers) < self._num_patches:
+                    if float(rng.uniform(0.0, 1.0)) < self._train_explore_prob:
+                        x, y = self._sample_center_in_thorax(rng)
+                    else:
+                        cx, cy, _ = top_candidates[int(rng.integers(0, len(top_candidates)))]
+                        x = float(np.clip(cx + rng.normal(0.0, self._guided_jitter), 0.0, 1.0))
+                        y = float(np.clip(cy + rng.normal(0.0, self._guided_jitter), 0.0, 1.0))
+                    centers.append((x, y))
+            else:
+                for cx, cy, _ in top_candidates:
+                    centers.append((float(cx), float(cy)))
+                    if len(centers) >= self._num_patches:
+                        break
+                if len(centers) < self._num_patches:
+                    for cx, cy, _ in candidates[top_n:]:
+                        centers.append((float(cx), float(cy)))
+                        if len(centers) >= self._num_patches:
+                            break
 
         while len(centers) < self._num_patches:
             centers.append(self._sample_center_in_thorax(rng))
@@ -786,11 +888,16 @@ class MilPatchDataset(Dataset):
         label_t = base_item["label"]
         file_name = str(base_item["file_name"])
         rng = self._rng_for_item(idx, file_name)
-        centers = self._sample_patch_centers(label=float(label_t.item()), file_name=file_name, rng=rng)
+        centers = self._sample_patch_centers(
+            image=image,
+            label=float(label_t.item()),
+            file_name=file_name,
+            rng=rng,
+        )
 
         patches: list[torch.Tensor] = []
         for cx, cy in centers:
-            scale = float(rng.uniform(self._min_scale, self._max_scale))
+            scale = float(rng.uniform(self._min_scale, self._max_scale)) if self._train else self._eval_scale
             crop_size = int(round(self._patch_size * scale))
             patches.append(self._extract_patch(image, center_x=cx, center_y=cy, crop_size=crop_size))
         patch_tensor = torch.stack(patches, dim=0)

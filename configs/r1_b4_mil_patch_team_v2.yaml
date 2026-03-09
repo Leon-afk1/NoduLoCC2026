@@ -5,7 +5,7 @@ model:
   type: mil_patch
   backbone: tf_efficientnet_b4.ns_jft_in1k
   mil:
-    num_patches: 16
+    num_patches: 10
     patch_size: 160
     min_scale: 0.9
     max_scale: 1.8
@@ -13,9 +13,15 @@ model:
     use_localization_priors: true
     positive_patch_prob: 0.7
     localization_jitter: 0.05
+    sampling_mode: guided
+    candidate_grid: 9
+    topk_fraction: 0.35
+    train_explore_prob: 0.2
+    guided_jitter: 0.02
+    score_kernel_size: 21
 
 train:
-  batch_size: 6
+  batch_size: 8
   output_dir: artifacts/checkpoints/r1_b4_mil_patch_team_v2
 
 eval:

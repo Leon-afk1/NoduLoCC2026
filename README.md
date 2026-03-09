@@ -7,6 +7,7 @@ Minimal, readable baseline focused on:
 - `configs/`: base + classification config
 - `src/nodulocc/`: core code (CLI, data, models, engine, metrics, tracking, HPO)
 - `NARVAL_SLURM_TUTORIAL.md`: step-by-step HPC/Slurm guide for Narval (Calcul Quebec)
+- `MIL_NOTES.md`: MIL baseline and guided-v2 patch sampling notes
 
 ## Setup
 ```bash
@@ -97,7 +98,7 @@ Config keys:
 - `train.compile`, `train.compile_mode` (optional acceleration with `torch.compile`)
 - `train.early_stopping.enabled`, `train.early_stopping.patience`, `train.early_stopping.min_delta`, `train.early_stopping.start_epoch`
 - `model.type`: `global` (full-image) or `mil_patch` (bag of patches)
-- `model.mil.*`: MIL patch extraction + attention pooling settings (`num_patches`, `patch_size`, `min_scale`, `max_scale`, `attention_hidden`, `use_localization_priors`, `positive_patch_prob`, `localization_jitter`)
+- `model.mil.*`: MIL patch extraction + attention pooling settings (`num_patches`, `patch_size`, `min_scale`, `max_scale`, `attention_hidden`, `use_localization_priors`, `positive_patch_prob`, `localization_jitter`, `sampling_mode`, `candidate_grid`, `topk_fraction`, `train_explore_prob`, `guided_jitter`, `score_kernel_size`)
 - `eval.auto_threshold_search`: in `kfold`, compute best OOF threshold (F1) and save it to `artifacts/thresholds/`
 - `eval.use_oof_threshold`: in `kfold` eval/predict, load and use saved OOF threshold automatically
 
