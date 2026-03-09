@@ -1,0 +1,15 @@
+base_config: base.yaml
+task: classification
+
+model:
+  backbone: tf_efficientnet_b4.ns_jft_in1k
+
+train:
+  loss:
+    name: bce
+    use_pos_weight: true
+  output_dir: artifacts/checkpoints/r1_b4_bce_posw
+
+tracking:
+  group: holdout_fastpass_b4
+

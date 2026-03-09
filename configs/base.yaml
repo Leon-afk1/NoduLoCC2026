@@ -1,0 +1,122 @@
+seed: 42
+task: classification
+
+data:
+  dataset_root: ../nodulocc_dataset
+  split_stratify: source_label  # label | source_label
+  classification:
+    labels_csv: classification_labels.csv
+    images_subdir: nih_filtered_images  # legacy fallback (single-directory mode)
+    nih_images_subdir: nih_filtered_images
+    lidc_images_subdir: lidc_png_16_bit
+    lidc_train_only: false  # true => keep LIDC samples in train only (never in val)
+  preprocessing:
+    profile: v1   # v1 | team_v2
+    clahe:
+      enabled: false
+      clip_limit: 2.0
+      tile_grid_size: 8
+    team_v2:
+      clip_percentiles: [1.0, 99.0]
+      use_thorax_mask: true
+      thorax_margin: 0.97
+      thorax_blur: 51
+      use_clahe: true
+      clahe_clip_limit: 2.0
+      clahe_tile_grid_size: 8
+      use_gaussian_blur: true
+      gaussian_kernel_size: 3
+      gaussian_sigma: 0.5
+      resize_interpolation: area  # area | linear
+  normalization:
+    enabled: true
+    mean: [0.485, 0.456, 0.406]
+    std: [0.229, 0.224, 0.225]
+  val_size: 0.2
+  split_dir: artifacts/splits
+
+validation:
+  mode: holdout       # holdout | kfold
+  k: 5                # used only when mode=kfold
+  fold_index: 0       # used by eval/predict in kfold mode
+
+model:
+  backbone: tf_efficientnet_b0.ns_jft_in1k
+  pretrained: true
+  dropout: 0.1
+  use_cbam: true
+
+train:
+  device: auto
+  batch_size: 16
+  num_workers: 8
+  pin_memory: true
+  persistent_workers: true
+  prefetch_factor: 4
+  drop_last_train: false
+  precision: bf16        # fp32 | bf16 | fp16
+  channels_last: true
+  cudnn_benchmark: true
+  tf32: true
+  matmul_precision: high # highest | high | medium
+  compile: false
+  compile_mode: default
+  epochs: 4
+  lr: 0.0002
+  layer_wise_lr: true
+  lr_backbone: 0.00001
+  lr_head: 0.0005
+  weight_decay: 0.0001
+  img_size: 512
+  use_weighted_sampler: true
+  loss:
+    name: bce               # bce | focal
+    focal_gamma: 2.0        # used only when name=focal
+    focal_alpha: 0.25       # used only when name=focal (set null to disable alpha weighting)
+    use_pos_weight: true
+  scheduler:
+    name: cosine            # none | cosine
+    warmup_epochs: 1
+    min_lr: 0.00001
+  early_stopping:
+    enabled: true
+    patience: 4             # stop after N epochs without sufficient improvement
+    min_delta: 0.0          # minimum metric improvement to reset patience
+    start_epoch: 1          # earliest epoch where early stopping can trigger
+  full_data: false    # true => train once on 100% data without validation
+  output_dir: artifacts/checkpoints
+
+eval:
+  threshold: 0.5
+  auto_threshold_search: true
+  threshold_search_min: 0.05
+  threshold_search_max: 0.95
+  threshold_search_steps: 181
+  threshold_output_dir: artifacts/thresholds
+  use_oof_threshold: false
+
+tracking:
+  enabled: true
+  provider: wandb
+  project: nodulocc
+  entity: null
+  group: null
+  auto_run_name: true
+  run_name_prefix: null
+  run_name: null
+  tags: []
+  log_data_exploration: true
+  data_samples_per_run: 8
+  log_artifacts: true
+  log_confusion_matrix: true
+  log_curves: true
+  log_prob_histograms: true
+  log_prediction_table: true
+  prediction_table_max_rows: 2000
+  log_eval_runs: true
+  log_predict_runs: true
+
+sweep:
+  n_trials: 10
+  direction: maximize
+  epochs_per_trial: 2

@@ -1,0 +1,20 @@
+base_config: base.yaml
+task: classification
+
+validation:
+  mode: holdout
+  k: 5
+  fold_index: 0
+
+model:
+  backbone: tf_efficientnet_b3.ns_jft_in1k
+
+train:
+  img_size: 512
+  batch_size: 12
+  epochs: 4
+  use_weighted_sampler: true
+  full_data: false
+
+eval:
+  threshold: 0.5

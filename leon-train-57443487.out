@@ -1,0 +1,88 @@
+cv2 OK: 4.8.1
+Copie des labels...
+Extraction NIH images...
+Extraction LIDC images...
+Dataset prêt dans /localscratch/leonmls.57443487.0/nodulocc_dataset
+Contenu : classification_labels.csv
+lidc_png_16_bit
+nih_filtered_images
+Démarrage de l'entraînement...
+wandb: Tracking run with wandb version 0.24.0
+wandb: W&B syncing is set to `offline` in this directory. Run `wandb online` or set WANDB_MODE=online to enable cloud syncing.
+wandb: Run data is saved locally in /lustre06/project/6069684/leonmls/NoduLoCC2026/wandb/offline-run-20260306_222040-0xd9v98c
+Building model: backbone=xrv:densenet121-res224-nih, pretrained=True, dropout=0.3, cbam=True
+[holdout] epoch 1/60 train_loss=0.1954 f1=0.0855 auc=0.4987
+[holdout] epoch 2/60 train_loss=0.1869 f1=0.0855 auc=0.4998
+[holdout] epoch 3/60 train_loss=0.1794 f1=0.0855 auc=0.4995
+[holdout] epoch 4/60 train_loss=0.1663 f1=0.0000 auc=0.4996
+[holdout] epoch 5/60 train_loss=0.1514 f1=0.0000 auc=0.4980
+[holdout] epoch 6/60 train_loss=0.1399 f1=0.0000 auc=0.4979
+[holdout] epoch 7/60 train_loss=0.1333 f1=0.0000 auc=0.4974
+[holdout] epoch 8/60 train_loss=0.1244 f1=0.0000 auc=0.4973
+[holdout] epoch 9/60 train_loss=0.1216 f1=0.0000 auc=0.4982
+[holdout] epoch 10/60 train_loss=0.1159 f1=0.0000 auc=0.4991
+[holdout] epoch 11/60 train_loss=0.1112 f1=0.0000 auc=0.5001
+[holdout] epoch 12/60 train_loss=0.1105 f1=0.0000 auc=0.4996
+[holdout] epoch 13/60 train_loss=0.1017 f1=0.0000 auc=0.4997
+[holdout] epoch 14/60 train_loss=0.0997 f1=0.0000 auc=0.4996
+[holdout] epoch 15/60 train_loss=0.0982 f1=0.0000 auc=0.4982
+[holdout] epoch 16/60 train_loss=0.0965 f1=0.0000 auc=0.5000
+[holdout] epoch 17/60 train_loss=0.0907 f1=0.0000 auc=0.4996
+[holdout] epoch 18/60 train_loss=0.0892 f1=0.0000 auc=0.4988
+[holdout] epoch 19/60 train_loss=0.0849 f1=0.0000 auc=0.4972
+[holdout] epoch 20/60 train_loss=0.0837 f1=0.0000 auc=0.4969
+[holdout] epoch 21/60 train_loss=0.0799 f1=0.0000 auc=0.4972
+[holdout] epoch 22/60 train_loss=0.0787 f1=0.0000 auc=0.4993
+[holdout] epoch 23/60 train_loss=0.0730 f1=0.0000 auc=0.4977
+[holdout] epoch 24/60 train_loss=0.0756 f1=0.0000 auc=0.4992
+[holdout] epoch 25/60 train_loss=0.0692 f1=0.0000 auc=0.4969
+[holdout] epoch 26/60 train_loss=0.0686 f1=0.0000 auc=0.4968
+[holdout] epoch 27/60 train_loss=0.0664 f1=0.0000 auc=0.4961
+[holdout] epoch 28/60 train_loss=0.0619 f1=0.0000 auc=0.4974
+[holdout] epoch 29/60 train_loss=0.0629 f1=0.0000 auc=0.4981
+[holdout] epoch 30/60 train_loss=0.0593 f1=0.0000 auc=0.4971
+[holdout] epoch 31/60 train_loss=0.0575 f1=0.0000 auc=0.4979
+[holdout] early stopping at epoch 31/60 (best_epoch=1, monitor=f1, best=0.0855)
+wandb: 
+wandb: Run history:
+wandb:                global/data/global_pos_rate ▁
+wandb: global/data/imbalance_no_finding_to_nodule ▁
+wandb:                       global/data/n_global ▁
+wandb:                        global/data/n_total ▁
+wandb:               global/data/no_finding_total ▁
+wandb:                   global/data/nodule_total ▁
+wandb:                           holdout/accuracy ▁████████████████████████████
+wandb:                                holdout/auc ▇▇▄▄▃▃▅▆█▇▇▇▅█▇▆▃▂▃▆▄▆▂▂▁▃▄▃▄
+wandb:                                 holdout/f1 █▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁
+wandb:                        holdout/lr_backbone ██████▇▇▇▇▇▆▆▆▆▅▅▅▅▄▄▄▃▃▂▂▂▁▁
+wandb:                                         +5 ...
+wandb: 
+wandb: Run summary:
+wandb:                global/data/global_pos_rate 0.0446
+wandb: global/data/imbalance_no_finding_to_nodule 21.4198
+wandb:                       global/data/n_global 63179
+wandb:                        global/data/n_total 63179
+wandb:               global/data/no_finding_total 60361
+wandb:                   global/data/nodule_total 2818
+wandb:                           holdout/accuracy 0.95537
+wandb:                                holdout/auc 0.49794
+wandb:                                 holdout/f1 0
+wandb:                        holdout/lr_backbone 3e-05
+wandb:                                         +5 ...
+wandb: 
+wandb: You can sync this run to the cloud by running:
+wandb: wandb sync /lustre06/project/6069684/leonmls/NoduLoCC2026/wandb/offline-run-20260306_222040-0xd9v98c
+wandb: Find logs at: ./wandb/offline-run-20260306_222040-0xd9v98c/logs
+wandb: WARNING Tried to log to step 1 that is less than the current step 3. Steps must be monotonically increasing, so this data will be ignored. See https://wandb.me/define-metric to log data out of order.
+wandb: WARNING Tried to log to step 2 that is less than the current step 3. Steps must be monotonically increasing, so this data will be ignored. See https://wandb.me/define-metric to log data out of order.
+{
+  "task": "classification",
+  "mode": "holdout",
+  "checkpoint": "artifacts/checkpoints/leon_xrv_nih_focal_cbam/classification_holdout_best.pt",
+  "best_metric": 0.08545454545454545,
+  "monitor": "f1",
+  "best_epoch": 1,
+  "epochs_ran": 31,
+  "stopped_early": true,
+  "train_seconds": 15790.704348802567
+}

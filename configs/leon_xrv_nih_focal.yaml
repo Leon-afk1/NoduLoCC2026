@@ -1,0 +1,42 @@
+base_config: base.yaml
+task: classification
+
+model:
+  backbone: xrv:densenet121-res224-nih   # pré-entraîné sur NIH ChestX-ray14
+  pretrained: true
+  dropout: 0.3
+  use_cbam: false   # CBAM retiré : poids aléatoires perturbent les features XRV
+
+data:
+  normalization:
+    enabled: false  # CRITIQUE: XRVBackbone gère sa propre normalisation en interne
+                    # (convertit [0,1] -> [-1024,1024]). ImageNet stats = inputs hors-range.
+  preprocessing:
+    profile: team_v2
+    team_v2:
+      use_thorax_mask: true
+      use_clahe: true
+
+train:
+  epochs: 60
+  batch_size: 24
+  loss:
+    name: bce
+    use_pos_weight: true   # pondère les nodules (~ratio neg/pos ≈ 20x) pour compenser le déséquilibre
+  grad_clip: 1.0           # gradient clipping (norme max)
+  layer_wise_lr: true
+  lr_backbone: 0.0001
+  lr_head: 0.001
+  early_stopping:
+    enabled: true
+    patience: 12
+    min_delta: 0.001
+    start_epoch: 20
+  output_dir: artifacts/checkpoints/leon_xrv_nih_bce
+
+eval:
+  threshold: 0.30          # seuil abaissé (XRV sort des proba basses)
+  auto_threshold_search: true
+
+tracking:
+  group: leon_xrv_nih_bce_v1

@@ -1,0 +1,36 @@
+base_config: base.yaml
+task: classification
+
+model:
+  backbone: tf_efficientnet_b4.ns_jft_in1k
+  pretrained: true
+  dropout: 0.4
+  use_cbam: true
+
+data:
+  preprocessing:
+    profile: team_v2
+    team_v2:
+      use_thorax_mask: true
+      use_clahe: true
+
+train:
+  epochs: 60
+  batch_size: 24
+  loss:
+    name: focal
+    focal_gamma: 2.0
+    focal_alpha: 0.75   # alpha appliqué aux POSITIFS (nodules) → doit être > 0.5 pour ratio 21:1
+    use_pos_weight: true  # pos_weight ~21 cumulé avec focal pour corriger le déséquilibre
+  layer_wise_lr: true
+  lr_backbone: 0.0001   # 10x plus élevé (1e-5 était trop bas pour fine-tune médical)
+  lr_head: 0.001
+  early_stopping:
+    enabled: true
+    patience: 12
+    min_delta: 0.001
+    start_epoch: 20
+  output_dir: artifacts/checkpoints/leon_b4_focal_cbam_team_v2_v2
+
+tracking:
+  group: leon_b4_focal_cbam_team_v2_v2
