@@ -7,12 +7,14 @@ construction, and dataloader creation.
 from __future__ import annotations
 
 import json
+import zlib
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import pandas as pd
 import torch
+import torch.nn.functional as F
 from PIL import Image
 from sklearn.model_selection import StratifiedKFold, train_test_split
 from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
@@ -27,6 +29,109 @@ except Exception:  # pragma: no cover - optional dependency, handled at runtime.
 
 
 LABEL_MAP = {"No Finding": 0, "Nodule": 1}
+
+
+# ---------------------------------------------------------------------------
+# MIL helpers
+# ---------------------------------------------------------------------------
+
+def _model_type(cfg: dict[str, Any]) -> str:
+    """Return model type (`global` or `mil_patch`)."""
+    model_type = str(cfg.get("model", {}).get("type", "global")).lower()
+    if model_type not in {"global", "mil_patch"}:
+        raise ValueError("model.type must be one of: global, mil_patch")
+    return model_type
+
+
+def _mil_settings(cfg: dict[str, Any]) -> dict[str, Any]:
+    """Return validated MIL settings from `model.mil`."""
+    mil_cfg = cfg.get("model", {}).get("mil", {})
+    num_patches = int(mil_cfg.get("num_patches", 16))
+    patch_size = int(mil_cfg.get("patch_size", 160))
+    min_scale = float(mil_cfg.get("min_scale", 0.9))
+    max_scale = float(mil_cfg.get("max_scale", 1.8))
+    use_loc = bool(mil_cfg.get("use_localization_priors", True))
+    pos_patch_prob = float(mil_cfg.get("positive_patch_prob", 0.7))
+    loc_jitter = float(mil_cfg.get("localization_jitter", 0.05))
+    sampling_mode = str(mil_cfg.get("sampling_mode", "guided")).lower()
+    candidate_grid = int(mil_cfg.get("candidate_grid", 9))
+    topk_fraction = float(mil_cfg.get("topk_fraction", 0.35))
+    train_explore_prob = float(mil_cfg.get("train_explore_prob", 0.2))
+    guided_jitter = float(mil_cfg.get("guided_jitter", 0.02))
+    score_kernel_size = int(mil_cfg.get("score_kernel_size", 21))
+
+    if num_patches < 1:
+        raise ValueError("model.mil.num_patches must be >= 1")
+    if patch_size < 32:
+        raise ValueError("model.mil.patch_size must be >= 32")
+    if min_scale <= 0.0 or max_scale <= 0.0 or min_scale > max_scale:
+        raise ValueError("model.mil.min_scale/max_scale must satisfy 0 < min_scale <= max_scale")
+    if not (0.0 <= pos_patch_prob <= 1.0):
+        raise ValueError("model.mil.positive_patch_prob must be in [0, 1]")
+    if loc_jitter < 0.0:
+        raise ValueError("model.mil.localization_jitter must be >= 0")
+    if sampling_mode not in {"guided", "random"}:
+        raise ValueError("model.mil.sampling_mode must be one of: guided, random")
+    if candidate_grid < 3:
+        raise ValueError("model.mil.candidate_grid must be >= 3")
+    if not (0.0 < topk_fraction <= 1.0):
+        raise ValueError("model.mil.topk_fraction must be in (0, 1]")
+    if not (0.0 <= train_explore_prob <= 1.0):
+        raise ValueError("model.mil.train_explore_prob must be in [0, 1]")
+    if guided_jitter < 0.0:
+        raise ValueError("model.mil.guided_jitter must be >= 0")
+    if score_kernel_size < 3:
+        raise ValueError("model.mil.score_kernel_size must be >= 3")
+    if score_kernel_size % 2 == 0:
+        score_kernel_size += 1
+
+    return {
+        "num_patches": num_patches,
+        "patch_size": patch_size,
+        "min_scale": min_scale,
+        "max_scale": max_scale,
+        "use_localization_priors": use_loc,
+        "positive_patch_prob": pos_patch_prob,
+        "localization_jitter": loc_jitter,
+        "sampling_mode": sampling_mode,
+        "candidate_grid": candidate_grid,
+        "topk_fraction": topk_fraction,
+        "train_explore_prob": train_explore_prob,
+        "guided_jitter": guided_jitter,
+        "score_kernel_size": score_kernel_size,
+    }
+
+
+def _load_localization_points(cfg: dict[str, Any]) -> dict[str, list[tuple[float, float]]]:
+    """Load localization CSV and return raw ``(x, y)`` points grouped by file name."""
+    cls_cfg = cfg.get("data", {}).get("classification", {})
+    loc_csv = str(cls_cfg.get("localization_csv", "localization_labels.csv"))
+    root = Path(cfg["data"]["dataset_root"]).resolve()
+    loc_path = root / loc_csv
+    # Try subdirectory resolution if not found at root
+    if not loc_path.is_file():
+        loc_path = Path(loc_csv)
+    if not loc_path.is_file():
+        return {}
+
+    loc_df = pd.read_csv(loc_path)
+    required = {"file_name", "x", "y"}
+    if not required.issubset(loc_df.columns):
+        return {}
+
+    loc_df = loc_df[["file_name", "x", "y"]].copy()
+    loc_df["x"] = pd.to_numeric(loc_df["x"], errors="coerce")
+    loc_df["y"] = pd.to_numeric(loc_df["y"], errors="coerce")
+    loc_df = loc_df.dropna(subset=["file_name", "x", "y"])
+    if len(loc_df) == 0:
+        return {}
+
+    points_by_file: dict[str, list[tuple[float, float]]] = {}
+    for file_name, part in loc_df.groupby("file_name"):
+        xs = part["x"].to_numpy(dtype=np.float32)
+        ys = part["y"].to_numpy(dtype=np.float32)
+        points_by_file[str(file_name)] = list(zip(xs.tolist(), ys.tolist()))
+    return points_by_file
 
 
 def _resolve(path_root: Path, value: str) -> Path:
@@ -493,6 +598,287 @@ class ClassificationDataset(Dataset):
         }
 
 
+# ---------------------------------------------------------------------------
+# MIL patch dataset
+# ---------------------------------------------------------------------------
+
+class MilPatchDataset(Dataset):
+    """MIL dataset returning a bag of patches per image.
+
+    Each sample contains:
+    - ``image``:     Tensor ``[N, 3, P, P]`` où N = num_patches, P = patch_size
+    - ``label``:     scalar tensor
+    - ``file_name``: nom du fichier source
+
+    Les centres de patches sont choisis via un sampler *guidé* (basé sur la
+    variance locale) ou aléatoire, avec injection optionnelle de priors de
+    localisation pour les exemples positifs en entraînement.
+    """
+
+    def __init__(
+        self,
+        df: pd.DataFrame,
+        img_size: int,
+        train: bool,
+        normalization: tuple[list[float], list[float]] | None,
+        clahe: tuple[float, int] | None,
+        preprocessing_profile: str,
+        cfg: dict[str, Any],
+    ) -> None:
+        self._train = bool(train)
+        self._seed = int(cfg.get("seed", 42))
+        self.df = df.reset_index(drop=True)
+        self._mil = _mil_settings(cfg)
+        self._num_patches = int(self._mil["num_patches"])
+        self._patch_size = int(self._mil["patch_size"])
+        self._min_scale = float(self._mil["min_scale"])
+        self._max_scale = float(self._mil["max_scale"])
+        self._positive_patch_prob = float(self._mil["positive_patch_prob"])
+        self._localization_jitter = float(self._mil["localization_jitter"])
+        self._sampling_mode = str(self._mil["sampling_mode"])
+        self._candidate_grid = int(self._mil["candidate_grid"])
+        self._topk_fraction = float(self._mil["topk_fraction"])
+        self._train_explore_prob = float(self._mil["train_explore_prob"])
+        self._guided_jitter = float(self._mil["guided_jitter"])
+        self._score_kernel_size = int(self._mil["score_kernel_size"])
+        self._eval_scale = float(0.5 * (self._min_scale + self._max_scale))
+
+        # Tenseurs de normalisation pour _score_view (dé-normaliser avant calcul de variance)
+        self._norm_mean_t: torch.Tensor | None = None
+        self._norm_std_t: torch.Tensor | None = None
+        if normalization is not None:
+            mean, std = normalization
+            self._norm_mean_t = torch.tensor(mean, dtype=torch.float32).view(3, 1, 1)
+            self._norm_std_t = torch.tensor(std, dtype=torch.float32).view(3, 1, 1)
+
+        # Réutilise le pipeline full-image existant (prétraitement + augmentation)
+        self._base_ds = ClassificationDataset(
+            self.df,
+            img_size=img_size,
+            train=train,
+            normalization=normalization,
+            clahe=clahe,
+            preprocessing_profile=preprocessing_profile,
+            cfg=cfg,
+        )
+
+        # Priors de localisation (seulement en entraînement)
+        self._loc_norm_by_file: dict[str, list[tuple[float, float]]] = {}
+        if self._train and bool(self._mil["use_localization_priors"]):
+            raw_points = _load_localization_points(cfg)
+            if raw_points:
+                self._loc_norm_by_file = self._normalize_localization_points(raw_points)
+
+    def _normalize_localization_points(
+        self,
+        raw_points: dict[str, list[tuple[float, float]]],
+    ) -> dict[str, list[tuple[float, float]]]:
+        """Normalise les coordonnées pixel brutes en [0, 1] via la taille originale de l'image."""
+        out: dict[str, list[tuple[float, float]]] = {}
+        for row in self.df.itertuples(index=False):
+            file_name = str(row.file_name)
+            points = raw_points.get(file_name)
+            if not points:
+                continue
+            try:
+                with Image.open(Path(str(row.image_path))) as img:
+                    w, h = img.size
+            except Exception:
+                continue
+            if w < 2 or h < 2:
+                continue
+            norm_points: list[tuple[float, float]] = []
+            for x, y in points:
+                nx = float(np.clip(float(x) / float(w - 1), 0.0, 1.0))
+                ny = float(np.clip(float(y) / float(h - 1), 0.0, 1.0))
+                norm_points.append((nx, ny))
+            if norm_points:
+                out[file_name] = norm_points
+        return out
+
+    def __len__(self) -> int:
+        return len(self._base_ds)
+
+    @staticmethod
+    def _sample_center_in_thorax(rng: np.random.Generator) -> tuple[float, float]:
+        """Échantillonne un centre dans une ellipse thoracique grossière."""
+        for _ in range(24):
+            x = float(rng.uniform(0.1, 0.9))
+            y = float(rng.uniform(0.1, 0.9))
+            if (((x - 0.5) / 0.45) ** 2 + ((y - 0.5) / 0.45) ** 2) <= 1.0:
+                return x, y
+        return 0.5, 0.5
+
+    def _rng_for_item(self, idx: int, file_name: str) -> np.random.Generator:
+        """RNG stochastique en train, déterministe en eval/predict."""
+        if self._train:
+            return np.random.default_rng(int(np.random.randint(0, 2**31 - 1)))
+        key = zlib.crc32(file_name.encode("utf-8")) & 0xFFFFFFFF
+        mixed = (self._seed * 1664525 + int(idx) * 1013904223 + key) % (2**32)
+        return np.random.default_rng(mixed)
+
+    def _score_view(self, image: torch.Tensor) -> torch.Tensor:
+        """Vue [H,W] en [0,1] pour le scoring de variance guidée."""
+        x = image.detach().float().cpu()
+        if self._norm_mean_t is not None and self._norm_std_t is not None:
+            x = x * self._norm_std_t + self._norm_mean_t
+        return x.clamp(0.0, 1.0).mean(dim=0)
+
+    def _guided_candidate_centers(self, image: torch.Tensor) -> list[tuple[float, float, float]]:
+        """Centres candidats classés par variance locale (carte de variance poolée)."""
+        gray = self._score_view(image)
+        k = int(self._score_kernel_size)
+        g = gray.unsqueeze(0).unsqueeze(0)
+        mean = F.avg_pool2d(g, kernel_size=k, stride=1, padding=k // 2)
+        mean2 = F.avg_pool2d(g * g, kernel_size=k, stride=1, padding=k // 2)
+        var_map = torch.clamp(mean2 - mean * mean, min=0.0).squeeze(0).squeeze(0)
+        h, w = int(var_map.shape[0]), int(var_map.shape[1])
+
+        xs = np.linspace(0.08, 0.92, self._candidate_grid, dtype=np.float32)
+        ys = np.linspace(0.08, 0.92, self._candidate_grid, dtype=np.float32)
+        candidates: list[tuple[float, float, float]] = []
+        for y in ys:
+            for x in xs:
+                if (((float(x) - 0.5) / 0.45) ** 2 + ((float(y) - 0.5) / 0.45) ** 2) > 1.0:
+                    continue
+                px = int(round(float(x) * (w - 1)))
+                py = int(round(float(y) * (h - 1)))
+                score = float(var_map[py, px].item())
+                candidates.append((float(x), float(y), score))
+
+        if not candidates:
+            return [(0.5, 0.5, 0.0)]
+        candidates.sort(key=lambda t: t[2], reverse=True)
+        return candidates
+
+    def _extract_patch(
+        self,
+        image: torch.Tensor,
+        center_x: float,
+        center_y: float,
+        crop_size: int,
+    ) -> torch.Tensor:
+        """Extrait et redimensionne un patch carré à la taille MIL cible."""
+        _, h, w = image.shape
+        crop = max(8, min(int(crop_size), h, w))
+        cx = int(round(center_x * (w - 1)))
+        cy = int(round(center_y * (h - 1)))
+        x0 = max(0, min(w - crop, cx - crop // 2))
+        y0 = max(0, min(h - crop, cy - crop // 2))
+        patch = image[:, y0 : y0 + crop, x0 : x0 + crop]
+        if patch.shape[1] != self._patch_size or patch.shape[2] != self._patch_size:
+            patch = F.interpolate(
+                patch.unsqueeze(0),
+                size=(self._patch_size, self._patch_size),
+                mode="bilinear",
+                align_corners=False,
+            ).squeeze(0)
+        return patch
+
+    def _sample_patch_centers(
+        self,
+        *,
+        image: torch.Tensor,
+        label: float,
+        file_name: str,
+        rng: np.random.Generator,
+    ) -> list[tuple[float, float]]:
+        """Échantillonne les centres via la stratégie guidée ou aléatoire + prior loc."""
+        centers: list[tuple[float, float]] = []
+
+        # Prior de localisation : centre biaisé vers un nodule annote pour les positifs
+        loc_points = self._loc_norm_by_file.get(file_name, [])
+        if label > 0.5 and loc_points and float(rng.uniform(0.0, 1.0)) <= self._positive_patch_prob:
+            x0, y0 = loc_points[int(rng.integers(0, len(loc_points)))]
+            x = float(np.clip(x0 + rng.normal(0.0, self._localization_jitter), 0.0, 1.0))
+            y = float(np.clip(y0 + rng.normal(0.0, self._localization_jitter), 0.0, 1.0))
+            centers.append((x, y))
+
+        if self._sampling_mode == "guided":
+            candidates = self._guided_candidate_centers(image)
+            top_n = max(1, int(round(len(candidates) * self._topk_fraction)))
+            top_candidates = candidates[:top_n]
+
+            if self._train:
+                while len(centers) < self._num_patches:
+                    if float(rng.uniform(0.0, 1.0)) < self._train_explore_prob:
+                        x, y = self._sample_center_in_thorax(rng)
+                    else:
+                        cx, cy, _ = top_candidates[int(rng.integers(0, len(top_candidates)))]
+                        x = float(np.clip(cx + rng.normal(0.0, self._guided_jitter), 0.0, 1.0))
+                        y = float(np.clip(cy + rng.normal(0.0, self._guided_jitter), 0.0, 1.0))
+                    centers.append((x, y))
+            else:
+                for cx, cy, _ in top_candidates:
+                    centers.append((float(cx), float(cy)))
+                    if len(centers) >= self._num_patches:
+                        break
+                for cx, cy, _ in candidates[top_n:]:
+                    if len(centers) >= self._num_patches:
+                        break
+                    centers.append((float(cx), float(cy)))
+
+        # Compléter avec des centres thoraciques aléatoires si nécessaire
+        while len(centers) < self._num_patches:
+            centers.append(self._sample_center_in_thorax(rng))
+        return centers
+
+    def __getitem__(self, idx: int) -> dict[str, Any]:
+        base_item = self._base_ds[idx]
+        image = base_item["image"]
+        label_t = base_item["label"]
+        file_name = str(base_item["file_name"])
+        rng = self._rng_for_item(idx, file_name)
+        centers = self._sample_patch_centers(
+            image=image,
+            label=float(label_t.item()),
+            file_name=file_name,
+            rng=rng,
+        )
+        patches: list[torch.Tensor] = []
+        for cx, cy in centers:
+            scale = float(rng.uniform(self._min_scale, self._max_scale)) if self._train else self._eval_scale
+            crop_size = int(round(self._patch_size * scale))
+            patches.append(self._extract_patch(image, center_x=cx, center_y=cy, crop_size=crop_size))
+        return {
+            "image": torch.stack(patches, dim=0),
+            "label": label_t,
+            "file_name": file_name,
+        }
+
+
+def _build_dataset(
+    cfg: dict[str, Any],
+    df: pd.DataFrame,
+    *,
+    img_size: int,
+    train: bool,
+    normalization: tuple[list[float], list[float]] | None,
+    clahe: tuple[float, int] | None,
+    preprocessing_profile: str,
+) -> Dataset:
+    """Crée un ClassificationDataset ou MilPatchDataset selon `model.type`."""
+    if _model_type(cfg) == "mil_patch":
+        return MilPatchDataset(
+            df,
+            img_size=img_size,
+            train=train,
+            normalization=normalization,
+            clahe=clahe,
+            preprocessing_profile=preprocessing_profile,
+            cfg=cfg,
+        )
+    return ClassificationDataset(
+        df,
+        img_size=img_size,
+        train=train,
+        normalization=normalization,
+        clahe=clahe,
+        preprocessing_profile=preprocessing_profile,
+        cfg=cfg,
+    )
+
+
 def _classification_sampler(df: pd.DataFrame) -> WeightedRandomSampler:
     """Build class-balanced sampler to mitigate strong label imbalance."""
     labels = df["label"].to_numpy(dtype=np.int64)
@@ -539,14 +925,14 @@ def build_dataloaders(
     prefetch_factor = int(cfg["train"].get("prefetch_factor", 4))
     drop_last_train = bool(cfg["train"].get("drop_last_train", False))
 
-    train_ds = ClassificationDataset(
+    train_ds = _build_dataset(
+        cfg,
         train_df,
         img_size=img_size,
         train=True,
         normalization=normalization,
         clahe=clahe,
         preprocessing_profile=preprocessing_profile,
-        cfg=cfg,
     )
     sampler = None
     if bool(cfg["train"].get("use_weighted_sampler", True)):
@@ -569,14 +955,14 @@ def build_dataloaders(
     if val_df is None:
         return train_loader, None, train_df, None
 
-    val_ds = ClassificationDataset(
+    val_ds = _build_dataset(
+        cfg,
         val_df,
         img_size=img_size,
         train=False,
         normalization=normalization,
         clahe=clahe,
         preprocessing_profile=preprocessing_profile,
-        cfg=cfg,
     )
     val_loader_kwargs: dict[str, Any] = {
         "dataset": val_ds,

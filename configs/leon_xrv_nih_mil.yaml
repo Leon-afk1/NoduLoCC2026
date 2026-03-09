@@ -1,0 +1,39 @@
+base_config: leon_xrv_nih_focal.yaml
+task: classification
+
+model:
+  type: mil_patch                        # active le MilPatchDataset + MilPatchClassificationModel
+  backbone: xrv:densenet121-res224-nih   # pré-entraîné NIH ChestX-ray14 (XRV)
+  pretrained: true
+  dropout: 0.3
+  use_cbam: false
+  mil:
+    num_patches: 10         # patches par image (réduit pour tenir en mémoire avec XRV)
+    patch_size: 160         # taille du patch en sortie (px)
+    min_scale: 0.9
+    max_scale: 1.8
+    attention_hidden: 256
+    use_localization_priors: true
+    positive_patch_prob: 0.7
+    localization_jitter: 0.05
+    sampling_mode: guided   # guided = variance locale ; random = thorax aléatoire
+    candidate_grid: 9
+    topk_fraction: 0.35
+    train_explore_prob: 0.2
+    guided_jitter: 0.02
+    score_kernel_size: 21
+
+train:
+  batch_size: 8             # réduit car chaque item = 10 patches × 3 × 160 × 160
+  loss:
+    name: bce
+    use_pos_weight: true
+  grad_clip: 1.0
+  output_dir: artifacts/checkpoints/leon_xrv_nih_mil
+
+eval:
+  threshold: 0.30
+  auto_threshold_search: true
+
+tracking:
+  group: leon_xrv_nih_mil_v1

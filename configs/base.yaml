@@ -41,10 +41,26 @@ validation:
   fold_index: 0       # used by eval/predict in kfold mode
 
 model:
+  type: global             # global | mil_patch
   backbone: tf_efficientnet_b0.ns_jft_in1k
   pretrained: true
   dropout: 0.1
   use_cbam: true
+  mil:
+    num_patches: 16
+    patch_size: 160
+    min_scale: 0.9
+    max_scale: 1.8
+    attention_hidden: 256
+    use_localization_priors: true
+    positive_patch_prob: 0.7
+    localization_jitter: 0.05
+    sampling_mode: guided     # guided | random
+    candidate_grid: 9         # nombre de points candidats par axe (mode guided)
+    topk_fraction: 0.35       # garder top X% des candidats les plus informatifs
+    train_explore_prob: 0.2   # proba de fallback vers centre thorax aléatoire à l'entraînement
+    guided_jitter: 0.02       # jitter autour des centres guidés (coordonnées normalisées)
+    score_kernel_size: 21     # taille du kernel pour la carte de variance locale (impair)
 
 train:
   device: auto
