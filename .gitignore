@@ -9,3 +9,4 @@ wandb/
 *.egg-info/
 *.out
 runs/
+doc.md

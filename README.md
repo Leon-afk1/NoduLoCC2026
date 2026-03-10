@@ -6,8 +6,9 @@ Minimal, readable baseline focused on:
 ## Project layout
 - `configs/`: base + classification config
 - `src/nodulocc/`: core code (CLI, data, models, engine, metrics, tracking, HPO)
-- `NARVAL_SLURM_TUTORIAL.md`: step-by-step HPC/Slurm guide for Narval (Calcul Quebec)
-- `MIL_NOTES.md`: MIL baseline and guided-v2 patch sampling notes
+- `docs/CODEBASE_ANALYSIS.md`: full architecture and module-by-module code analysis
+- `docs/NARVAL_SLURM_TUTORIAL.md`: step-by-step HPC/Slurm guide for Narval (Calcul Quebec)
+- `docs/MIL_NOTES.md`: MIL baseline and guided-v2 patch sampling notes
 
 ## Setup
 ```bash
