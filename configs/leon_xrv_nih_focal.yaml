@@ -5,12 +5,11 @@ model:
   backbone: xrv:densenet121-res224-nih   # pré-entraîné sur NIH ChestX-ray14
   pretrained: true
   dropout: 0.3
-  use_cbam: false   # CBAM retiré : poids aléatoires perturbent les features XRV
+  use_cbam: false   # poids aléatoires perturbent les features XRV
 
 data:
   normalization:
-    enabled: false  # CRITIQUE: XRVBackbone gère sa propre normalisation en interne
-                    # (convertit [0,1] -> [-1024,1024]). ImageNet stats = inputs hors-range.
+    enabled: false  # XRVBackbone gère sa propre normalisation en interne
   preprocessing:
     profile: team_v2
     team_v2:
@@ -22,8 +21,8 @@ train:
   batch_size: 24
   loss:
     name: bce
-    use_pos_weight: true   # pondère les nodules (~ratio neg/pos ≈ 20x) pour compenser le déséquilibre
-  grad_clip: 1.0           # gradient clipping (norme max)
+    use_pos_weight: true   
+  grad_clip: 1.0           
   layer_wise_lr: true
   lr_backbone: 0.0001
   lr_head: 0.001
@@ -35,7 +34,7 @@ train:
   output_dir: artifacts/checkpoints/leon_xrv_nih_bce
 
 eval:
-  threshold: 0.30          # seuil abaissé (XRV sort des proba basses)
+  threshold: 0.30          
   auto_threshold_search: true
 
 tracking:

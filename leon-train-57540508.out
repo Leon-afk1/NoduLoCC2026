@@ -1,0 +1,104 @@
+cv2 OK: 4.8.1
+Copie des labels...
+Extraction NIH images...
+Extraction LIDC images...
+Dataset prêt dans /localscratch/leonmls.57540508.0/nodulocc_dataset
+Contenu : classification_labels.csv
+lidc_png_16_bit
+nih_filtered_images
+Démarrage de l'entraînement...
+wandb: Tracking run with wandb version 0.24.0
+wandb: W&B syncing is set to `offline` in this directory. Run `wandb online` or set WANDB_MODE=online to enable cloud syncing.
+wandb: Run data is saved locally in /lustre06/project/6069684/leonmls/NoduLoCC2026/wandb/offline-run-20260309_124205-cnhsuwmu
+Building model: backbone=xrv:densenet121-res224-nih, pretrained=True, dropout=0.3, cbam=False
+[holdout] epoch 1/60 train_loss=1.9196 f1=0.0855 auc=0.7415 pr_auc=0.1589 prec=0.0446 rec=1.0000 tp=564 fp=12072 fn=0
+[holdout] epoch 2/60 train_loss=1.7385 f1=0.0957 auc=0.7389 pr_auc=0.1762 prec=0.0503 rec=0.9699 tp=547 fp=10324 fn=17
+[holdout] epoch 3/60 train_loss=1.5946 f1=0.1152 auc=0.7417 pr_auc=0.1618 prec=0.0617 rec=0.8759 tp=494 fp=7518 fn=70
+[holdout] epoch 4/60 train_loss=1.4846 f1=0.1610 auc=0.7374 pr_auc=0.1835 prec=0.0921 rec=0.6383 tp=360 fp=3547 fn=204
+[holdout] epoch 5/60 train_loss=1.4135 f1=0.1476 auc=0.7285 pr_auc=0.1722 prec=0.0830 rec=0.6667 tp=376 fp=4156 fn=188
+[holdout] epoch 6/60 train_loss=1.2852 f1=0.1699 auc=0.7261 pr_auc=0.1660 prec=0.1003 rec=0.5567 tp=314 fp=2818 fn=250
+[holdout] epoch 7/60 train_loss=1.2179 f1=0.1870 auc=0.7376 pr_auc=0.1645 prec=0.1144 rec=0.5106 tp=288 fp=2229 fn=276
+[holdout] epoch 8/60 train_loss=1.1330 f1=0.1759 auc=0.7229 pr_auc=0.1503 prec=0.1074 rec=0.4858 tp=274 fp=2278 fn=290
+[holdout] epoch 9/60 train_loss=1.0528 f1=0.1746 auc=0.7229 pr_auc=0.1528 prec=0.1057 rec=0.5018 tp=283 fp=2395 fn=281
+[holdout] epoch 10/60 train_loss=1.0504 f1=0.1924 auc=0.7240 pr_auc=0.1637 prec=0.1249 rec=0.4184 tp=236 fp=1653 fn=328
+[holdout] epoch 11/60 train_loss=0.9660 f1=0.2065 auc=0.7221 pr_auc=0.1498 prec=0.1376 rec=0.4131 tp=233 fp=1460 fn=331
+[holdout] epoch 12/60 train_loss=0.9037 f1=0.2046 auc=0.7235 pr_auc=0.1402 prec=0.1358 rec=0.4149 tp=234 fp=1489 fn=330
+[holdout] epoch 13/60 train_loss=0.9044 f1=0.2213 auc=0.7246 pr_auc=0.1625 prec=0.1469 rec=0.4486 tp=253 fp=1469 fn=311
+[holdout] epoch 14/60 train_loss=0.9365 f1=0.2436 auc=0.7005 pr_auc=0.1574 prec=0.2078 rec=0.2943 tp=166 fp=633 fn=398
+[holdout] epoch 15/60 train_loss=0.9665 f1=0.2170 auc=0.7083 pr_auc=0.1405 prec=0.1659 rec=0.3138 tp=177 fp=890 fn=387
+[holdout] epoch 16/60 train_loss=0.9185 f1=0.2326 auc=0.7130 pr_auc=0.1562 prec=0.1791 rec=0.3316 tp=187 fp=857 fn=377
+[holdout] epoch 17/60 train_loss=0.8945 f1=0.2168 auc=0.7015 pr_auc=0.1400 prec=0.1693 rec=0.3014 tp=170 fp=834 fn=394
+[holdout] epoch 18/60 train_loss=0.8176 f1=0.2165 auc=0.7073 pr_auc=0.1330 prec=0.1568 rec=0.3493 tp=197 fp=1059 fn=367
+[holdout] epoch 19/60 train_loss=0.8704 f1=0.2079 auc=0.7011 pr_auc=0.1513 prec=0.1597 rec=0.2979 tp=168 fp=884 fn=396
+[holdout] epoch 20/60 train_loss=0.8264 f1=0.2088 auc=0.7098 pr_auc=0.1239 prec=0.1531 rec=0.3280 tp=185 fp=1023 fn=379
+[holdout] epoch 21/60 train_loss=0.8164 f1=0.2399 auc=0.6993 pr_auc=0.1543 prec=0.2386 rec=0.2411 tp=136 fp=434 fn=428
+[holdout] epoch 22/60 train_loss=0.8057 f1=0.2328 auc=0.6956 pr_auc=0.1378 prec=0.2049 rec=0.2695 tp=152 fp=590 fn=412
+[holdout] epoch 23/60 train_loss=0.8376 f1=0.2384 auc=0.6919 pr_auc=0.1460 prec=0.2357 rec=0.2411 tp=136 fp=441 fn=428
+[holdout] epoch 24/60 train_loss=0.7574 f1=0.2416 auc=0.6959 pr_auc=0.1488 prec=0.2477 rec=0.2358 tp=133 fp=404 fn=431
+[holdout] epoch 25/60 train_loss=0.6788 f1=0.2426 auc=0.6930 pr_auc=0.1395 prec=0.2129 rec=0.2819 tp=159 fp=588 fn=405
+[holdout] epoch 26/60 train_loss=0.7995 f1=0.2201 auc=0.6805 pr_auc=0.1338 prec=0.2024 rec=0.2411 tp=136 fp=536 fn=428
+[holdout] epoch 27/60 train_loss=0.6277 f1=0.2261 auc=0.6990 pr_auc=0.1399 prec=0.1912 rec=0.2766 tp=156 fp=660 fn=408
+[holdout] epoch 28/60 train_loss=0.6358 f1=0.2386 auc=0.6888 pr_auc=0.1402 prec=0.2313 rec=0.2465 tp=139 fp=462 fn=425
+[holdout] epoch 29/60 train_loss=0.6126 f1=0.2338 auc=0.6959 pr_auc=0.1344 prec=0.2065 rec=0.2695 tp=152 fp=584 fn=412
+[holdout] epoch 30/60 train_loss=0.5725 f1=0.2361 auc=0.6905 pr_auc=0.1395 prec=0.2573 rec=0.2181 tp=123 fp=355 fn=441
+[holdout] epoch 31/60 train_loss=0.5664 f1=0.2292 auc=0.6931 pr_auc=0.1521 prec=0.2817 rec=0.1933 tp=109 fp=278 fn=455
+[holdout] early stopping at epoch 31/60 (best_epoch=14, monitor=f1, best=0.2436)
+
+============================================================
+RÉSUMÉ FINAL  [holdout]  best_epoch=14  threshold=0.800
+============================================================
+  ROC-AUC        : 0.7005
+  PR-AUC         : 0.1574
+  F1             : 0.2486
+  Precision      : 0.2333
+  Recall (Sens.) : 0.2660
+  Specificity    : 0.9592
+  NPV            : 0.9655
+  Accuracy       : 0.9282
+  Confusion mat. : TP=150  FP=493  TN=11579  FN=414
+  Val set        : 564 nodules / 12072 no-finding
+============================================================
+
+wandb: 
+wandb: Run history:
+wandb:                global/data/global_pos_rate ▁
+wandb: global/data/imbalance_no_finding_to_nodule ▁
+wandb:                       global/data/n_global ▁
+wandb:                        global/data/n_total ▁
+wandb:               global/data/no_finding_total ▁
+wandb:                   global/data/nodule_total ▁
+wandb:                           holdout/accuracy ▁▅▄▆▆▆▆▇▇▇▇█▇▇▇▇▇▇███████████
+wandb:                                holdout/auc ██▆▆█▆▆▆▆▆▆▃▄▅▃▄▃▄▃▃▂▃▂▁▃▂▃▂▂
+wandb:                      holdout/avg_precision ▅█▇▆▆▄▄▆▄▃▆▅▃▅▃▂▄▁▅▃▄▄▃▂▃▃▂▃▄
+wandb:                                 holdout/f1 ▁▃▃▄▅▄▄▅▆▆▇█▇▇▇▇▆▆█▇███▇▇█▇█▇
+wandb:                                        +12 ...
+wandb: 
+wandb: Run summary:
+wandb:                global/data/global_pos_rate 0.0446
+wandb: global/data/imbalance_no_finding_to_nodule 21.4198
+wandb:                       global/data/n_global 63179
+wandb:                        global/data/n_total 63179
+wandb:               global/data/no_finding_total 60361
+wandb:                   global/data/nodule_total 2818
+wandb:                           holdout/accuracy 0.94199
+wandb:                                holdout/auc 0.69306
+wandb:                      holdout/avg_precision 0.15206
+wandb:                                 holdout/f1 0.22923
+wandb:                                        +12 ...
+wandb: 
+wandb: You can sync this run to the cloud by running:
+wandb: wandb sync /lustre06/project/6069684/leonmls/NoduLoCC2026/wandb/offline-run-20260309_124205-cnhsuwmu
+wandb: Find logs at: ./wandb/offline-run-20260309_124205-cnhsuwmu/logs
+wandb: WARNING Tried to log to step 1 that is less than the current step 3. Steps must be monotonically increasing, so this data will be ignored. See https://wandb.me/define-metric to log data out of order.
+wandb: WARNING Tried to log to step 2 that is less than the current step 3. Steps must be monotonically increasing, so this data will be ignored. See https://wandb.me/define-metric to log data out of order.
+{
+  "task": "classification",
+  "mode": "holdout",
+  "checkpoint": "artifacts/checkpoints/leon_xrv_nih_bce/classification_holdout_best.pt",
+  "best_metric": 0.24358033749082905,
+  "monitor": "f1",
+  "best_epoch": 14,
+  "epochs_ran": 31,
+  "stopped_early": true,
+  "train_seconds": 15633.92383480072
+}
