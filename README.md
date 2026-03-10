@@ -98,6 +98,8 @@ Config keys:
 - `train.compile`, `train.compile_mode` (optional acceleration with `torch.compile`)
 - `train.early_stopping.enabled`, `train.early_stopping.patience`, `train.early_stopping.min_delta`, `train.early_stopping.start_epoch`
 - `model.type`: `global` (full-image) or `mil_patch` (bag of patches)
+- `model.init_checkpoint`: optional external checkpoint used to initialize weights before training
+- `model.init_ignore_head`, `model.init_strip_prefixes`, `model.init_add_prefix`: remapping controls for external checkpoints
 - `model.mil.*`: MIL patch extraction + attention pooling settings (`num_patches`, `patch_size`, `min_scale`, `max_scale`, `attention_hidden`, `use_localization_priors`, `positive_patch_prob`, `localization_jitter`, `sampling_mode`, `candidate_grid`, `topk_fraction`, `train_explore_prob`, `guided_jitter`, `score_kernel_size`)
 - `eval.auto_threshold_search`: in `kfold`, compute best OOF threshold (F1) and save it to `artifacts/thresholds/`
 - `eval.use_oof_threshold`: in `kfold` eval/predict, load and use saved OOF threshold automatically
@@ -167,6 +169,22 @@ uv run python -m nodulocc.cli train --config configs/classification.yaml \
   --override data.preprocessing.clahe.enabled=true \
   --override data.preprocessing.clahe.clip_limit=2.0 \
   --override data.preprocessing.clahe.tile_grid_size=8
+```
+
+### Initialize from an external CXR checkpoint
+Export TorchXRayVision weights first:
+```bash
+uv run python -m nodulocc.export_xrv_checkpoint \
+  --weights resnet50-res512-all \
+  --out artifacts/pretrained/xrv_resnet50_res512_all_init.pt
+```
+
+Then train with external init:
+```bash
+uv run python -m nodulocc.cli train --config configs/r_final_b4_global_cxr_init.yaml \
+  --override model.backbone=resnet50 \
+  --override model.pretrained=false \
+  --override model.init_checkpoint=artifacts/pretrained/xrv_resnet50_res512_all_init.pt
 ```
 
 ### Enable Team Preprocessing V2

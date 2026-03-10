@@ -54,6 +54,11 @@ model:
   backbone: tf_efficientnet_b0.ns_jft_in1k
   pretrained: true
   dropout: 0.1
+  # Optional external checkpoint init (useful for CXR-specific pretrained weights).
+  init_checkpoint: null
+  init_ignore_head: true
+  init_strip_prefixes: ["module."]
+  init_add_prefix: auto   # auto | "" | "backbone."
   mil:
     num_patches: 16
     patch_size: 160

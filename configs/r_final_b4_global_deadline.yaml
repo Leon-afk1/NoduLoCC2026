@@ -1,0 +1,23 @@
+base_config: r1_b4_bce_posw_team_v2_no_double_comp.yaml
+task: classification
+
+model:
+  type: global
+  backbone: tf_efficientnet_b4.ns_jft_in1k
+
+train:
+  # Fast/robust iteration setup for deadline mode.
+  epochs: 8
+  batch_size: 16
+  early_stopping:
+    enabled: true
+    patience: 2
+    min_delta: 0.0
+    start_epoch: 1
+  output_dir: artifacts/checkpoints/r_final_b4_global_deadline
+
+eval:
+  threshold: 0.65
+
+tracking:
+  group: final_b4_global_deadline

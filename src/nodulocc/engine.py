@@ -135,6 +135,160 @@ def _build_grad_scaler(device: torch.device, precision: str) -> Any:
     return _NoOpGradScaler()
 
 
+def _checkpoint_state_dict(payload: Any) -> dict[str, torch.Tensor]:
+    """Extract a flat tensor state-dict from heterogeneous checkpoint formats."""
+    if isinstance(payload, dict):
+        for key in ("state_dict", "model_state_dict", "model", "net", "weights"):
+            nested = payload.get(key)
+            if isinstance(nested, dict):
+                payload = nested
+                break
+    if not isinstance(payload, dict):
+        raise ValueError("Checkpoint does not contain a dictionary state-dict.")
+    state_dict: dict[str, torch.Tensor] = {}
+    for key, value in payload.items():
+        if isinstance(value, torch.Tensor):
+            state_dict[str(key)] = value
+    if len(state_dict) == 0:
+        raise ValueError("Checkpoint state-dict has no tensor entries.")
+    return state_dict
+
+
+def _strip_known_prefixes(key: str, prefixes: list[str]) -> str:
+    """Strip one or multiple configured prefixes from a parameter key."""
+    out = key
+    changed = True
+    while changed:
+        changed = False
+        for prefix in prefixes:
+            if prefix and out.startswith(prefix):
+                out = out[len(prefix) :]
+                changed = True
+                break
+    return out
+
+
+def _is_head_parameter_key(key: str) -> bool:
+    """Return True if key likely belongs to classification head layers."""
+    probe = key
+    for prefix in ("module.", "backbone."):
+        if probe.startswith(prefix):
+            probe = probe[len(prefix) :]
+    return probe.startswith(
+        (
+            "head.",
+            "classifier.",
+            "fc.",
+            "last_linear.",
+            "logits.",
+            "aux_head.",
+        )
+    )
+
+
+def _compatible_key_count(
+    model_state: dict[str, torch.Tensor],
+    raw_state: dict[str, torch.Tensor],
+    *,
+    add_prefix: str,
+    ignore_head: bool,
+) -> int:
+    """Count checkpoint keys that match model keys with same shape."""
+    n = 0
+    for key, value in raw_state.items():
+        mapped = f"{add_prefix}{key}"
+        if ignore_head and _is_head_parameter_key(mapped):
+            continue
+        if mapped in model_state and model_state[mapped].shape == value.shape:
+            n += 1
+    return n
+
+
+def _load_external_init_weights(cfg: dict[str, Any], model: nn.Module) -> None:
+    """Optionally initialize model weights from an external checkpoint.
+
+    Config keys under `model`:
+    - `init_checkpoint`: path to external checkpoint (default: null)
+    - `init_ignore_head`: ignore classifier/head keys (default: true)
+    - `init_strip_prefixes`: prefixes stripped from checkpoint keys (default: ["module."])
+    - `init_add_prefix`: "auto" | "" | "backbone." (default: "auto")
+    """
+    model_cfg = cfg.get("model", {})
+    ckpt_value = model_cfg.get("init_checkpoint")
+    if ckpt_value in (None, "", "null"):
+        return
+
+    ckpt_path = Path(str(ckpt_value))
+    if not ckpt_path.is_absolute():
+        cfg_path = Path(str(cfg.get("_config_path", "."))).resolve()
+        ckpt_path = (cfg_path.parent / ckpt_path).resolve()
+    if not ckpt_path.is_file():
+        raise FileNotFoundError(f"model.init_checkpoint not found: {ckpt_path}")
+
+    ignore_head = bool(model_cfg.get("init_ignore_head", True))
+    strip_raw = model_cfg.get("init_strip_prefixes", ["module."])
+    if isinstance(strip_raw, str):
+        strip_prefixes = [strip_raw]
+    elif isinstance(strip_raw, list):
+        strip_prefixes = [str(x) for x in strip_raw if str(x)]
+    else:
+        strip_prefixes = ["module."]
+
+    add_prefix_cfg = str(model_cfg.get("init_add_prefix", "auto"))
+    if add_prefix_cfg == "auto":
+        add_prefix_options = ["", "backbone."]
+    else:
+        add_prefix_options = [add_prefix_cfg]
+
+    payload = torch.load(ckpt_path, map_location="cpu")
+    raw_state = _checkpoint_state_dict(payload)
+    stripped_state = { _strip_known_prefixes(k, strip_prefixes): v for k, v in raw_state.items() }
+    model_state = model.state_dict()
+
+    best_prefix = ""
+    best_count = -1
+    for candidate in add_prefix_options:
+        count = _compatible_key_count(
+            model_state=model_state,
+            raw_state=stripped_state,
+            add_prefix=candidate,
+            ignore_head=ignore_head,
+        )
+        if count > best_count:
+            best_count = count
+            best_prefix = candidate
+
+    filtered: dict[str, torch.Tensor] = {}
+    skipped_head = 0
+    skipped_missing_or_shape = 0
+    for key, value in stripped_state.items():
+        mapped = f"{best_prefix}{key}"
+        if ignore_head and _is_head_parameter_key(mapped):
+            skipped_head += 1
+            continue
+        if mapped not in model_state or model_state[mapped].shape != value.shape:
+            skipped_missing_or_shape += 1
+            continue
+        filtered[mapped] = value
+
+    if len(filtered) == 0:
+        raise RuntimeError(
+            "No compatible weights were found in model.init_checkpoint. "
+            "Check model.backbone, init_add_prefix, and init_strip_prefixes."
+        )
+
+    missing, unexpected = model.load_state_dict(filtered, strict=False)
+    print(
+        "[train] external init loaded from "
+        f"{ckpt_path} | matched={len(filtered)} "
+        f"| skipped_head={skipped_head} "
+        f"| skipped_missing_or_shape={skipped_missing_or_shape} "
+        f"| load_missing={len(missing)} "
+        f"| load_unexpected={len(unexpected)} "
+        f"| add_prefix='{best_prefix}'"
+    )
+
+
 def _to_numpy_float32(tensor: torch.Tensor) -> np.ndarray:
     """Convert tensor to float32 numpy array (safe for bfloat16 tensors)."""
     return tensor.detach().float().cpu().numpy()
@@ -319,7 +473,9 @@ def _run_single_training(
     precision = _resolve_precision(cfg, device)
     channels_last = _use_channels_last(cfg, device)
 
-    model = build_model(task="classification", model_cfg=cfg["model"]).to(device)
+    model = build_model(task="classification", model_cfg=cfg["model"])
+    _load_external_init_weights(cfg, model)
+    model = model.to(device)
     if channels_last:
         model = model.to(memory_format=torch.channels_last)
     model = _compile_model_if_enabled(cfg, model)
