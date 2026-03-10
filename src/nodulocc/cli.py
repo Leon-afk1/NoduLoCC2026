@@ -10,6 +10,7 @@ import argparse
 import json
 
 from .config import load_config
+from .ensemble import run_two_model_ensemble
 from .engine import evaluate, predict, train
 from .hpo import run_sweep
 
@@ -41,6 +42,21 @@ def _parser() -> argparse.ArgumentParser:
     p_sweep.add_argument("--config", required=True)
     p_sweep.add_argument("--override", action="append", default=[])
 
+    p_ensemble = sub.add_parser("ensemble")
+    p_ensemble.add_argument("--config-a", required=True)
+    p_ensemble.add_argument("--ckpt-a", required=True)
+    p_ensemble.add_argument("--config-b", required=True)
+    p_ensemble.add_argument("--ckpt-b", required=True)
+    p_ensemble.add_argument("--out-dir", required=True)
+    p_ensemble.add_argument("--split", default="val", choices=["train", "val", "all"])
+    p_ensemble.add_argument("--reference", default="a", choices=["a", "b"])
+    p_ensemble.add_argument("--weight-a", type=float, default=0.5)
+    p_ensemble.add_argument("--default-threshold", type=float, default=0.5)
+    p_ensemble.add_argument("--fold-a", type=int, required=False)
+    p_ensemble.add_argument("--fold-b", type=int, required=False)
+    p_ensemble.add_argument("--override-a", action="append", default=[])
+    p_ensemble.add_argument("--override-b", action="append", default=[])
+
     return p
 
 
@@ -63,6 +79,12 @@ def _apply_fold(cfg: dict, fold: int | None) -> dict:
 def main() -> None:
     """Execute the requested CLI subcommand and print JSON output."""
     args = _parser().parse_args()
+
+    if args.command == "ensemble":
+        result = run_two_model_ensemble(args)
+        print(json.dumps(result, indent=2))
+        return
+
     cfg = _validate_task(load_config(args.config, overrides=args.override))
 
     if args.command == "train":
