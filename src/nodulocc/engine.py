@@ -417,6 +417,20 @@ def _set_optimizer_lr(optimizer: torch.optim.Optimizer, lr: float) -> None:
         group["lr"] = float(lr)
 
 
+def _resolve_monitor_metric(cfg: dict[str, Any], has_validation: bool) -> tuple[str, bool]:
+    """Resolve checkpoint/early-stopping monitor metric and optimization direction.
+
+    Returns `(metric_name, higher_is_better)`.
+    """
+    if not has_validation:
+        return "train_loss", False
+
+    monitor = str(cfg.get("train", {}).get("monitor_metric", "f1")).lower()
+    if monitor not in {"f1", "auc"}:
+        raise ValueError("train.monitor_metric must be one of: f1, auc")
+    return monitor, True
+
+
 def _threshold_output_path(cfg: dict[str, Any], k: int) -> Path:
     """Return path where OOF threshold search results are persisted."""
     out_dir = Path(cfg.get("eval", {}).get("threshold_output_dir", "artifacts/thresholds"))
@@ -505,12 +519,8 @@ def _run_single_training(
     epoch_lrs = _build_epoch_lrs(cfg, epochs=epochs, base_lr=base_lr)
     threshold = float(cfg.get("eval", {}).get("threshold", 0.5))
 
-    if val_loader is None:
-        monitor = "train_loss"
-        best_value = np.inf
-    else:
-        monitor = "f1"
-        best_value = -np.inf
+    monitor, monitor_higher_is_better = _resolve_monitor_metric(cfg, has_validation=(val_loader is not None))
+    best_value = -np.inf if monitor_higher_is_better else np.inf
 
     es_cfg = cfg.get("train", {}).get("early_stopping", {})
     es_enabled = bool(es_cfg.get("enabled", False))
@@ -576,7 +586,7 @@ def _run_single_training(
             )
             metrics["train_loss"] = float(train_loss)
             metrics["lr"] = lr
-            current = float(metrics["f1"])
+            current = float(metrics[monitor])
             improved = current > (best_value + es_min_delta)
 
         tracker.log({f"{log_prefix}/{k}": v for k, v in metrics.items()}, step=epoch)
@@ -591,7 +601,8 @@ def _run_single_training(
                     f"[{log_prefix}] epoch {epoch}/{epochs} "
                     f"train_loss={float(train_loss):.4f} "
                     f"f1={float(metrics.get('f1', 0.0)):.4f} "
-                    f"auc={float(metrics.get('auc', 0.0)):.4f}"
+                    f"auc={float(metrics.get('auc', 0.0)):.4f} "
+                    f"monitor={monitor}:{current:.4f}"
                 )
 
         if improved:

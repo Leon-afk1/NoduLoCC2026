@@ -1,0 +1,20 @@
+base_config: r1_b4_bce_posw.yaml
+task: classification
+
+train:
+  # Keep the strongest simple setup, but select checkpoints on ranking quality.
+  monitor_metric: auc
+  epochs: 8
+  early_stopping:
+    enabled: true
+    patience: 2
+    min_delta: 0.0
+    start_epoch: 1
+  output_dir: artifacts/checkpoints/r_final_b4_auc_select
+
+eval:
+  # Keep threshold neutral during training; tune it afterward on validation.
+  threshold: 0.5
+
+tracking:
+  group: final_b4_auc_select
