@@ -7,6 +7,7 @@ model:
   # TorchXRayVision resnet50-res512-all -> timm resnet50.
   backbone: resnet50
   pretrained: false
+  # Path can be absolute or relative to repo root / current working directory.
   init_checkpoint: artifacts/pretrained/xrv_resnet50_res512_all_init.pt
   init_ignore_head: true
   init_strip_prefixes: ["module."]

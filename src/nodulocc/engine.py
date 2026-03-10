@@ -218,12 +218,27 @@ def _load_external_init_weights(cfg: dict[str, Any], model: nn.Module) -> None:
     if ckpt_value in (None, "", "null"):
         return
 
-    ckpt_path = Path(str(ckpt_value))
-    if not ckpt_path.is_absolute():
+    raw_ckpt_path = Path(str(ckpt_value))
+    if raw_ckpt_path.is_absolute():
+        ckpt_path = raw_ckpt_path
+    else:
         cfg_path = Path(str(cfg.get("_config_path", "."))).resolve()
-        ckpt_path = (cfg_path.parent / ckpt_path).resolve()
+        candidates = [
+            (Path.cwd() / raw_ckpt_path).resolve(),
+            (cfg_path.parent / raw_ckpt_path).resolve(),
+        ]
+        # Common case: config lives in ./configs and artifacts in repo root.
+        if cfg_path.parent.name == "configs":
+            candidates.append((cfg_path.parent.parent / raw_ckpt_path).resolve())
+
+        existing = [p for p in candidates if p.is_file()]
+        ckpt_path = existing[0] if existing else candidates[0]
+
     if not ckpt_path.is_file():
-        raise FileNotFoundError(f"model.init_checkpoint not found: {ckpt_path}")
+        raise FileNotFoundError(
+            "model.init_checkpoint not found. "
+            f"Configured='{raw_ckpt_path}', resolved='{ckpt_path}'"
+        )
 
     ignore_head = bool(model_cfg.get("init_ignore_head", True))
     strip_raw = model_cfg.get("init_strip_prefixes", ["module."])
