@@ -1,0 +1,28 @@
+base_config: r1_b4_bce_posw.yaml
+task: classification
+
+data:
+  classification:
+    # Keep the validation set NIH-only while still allowing the extra
+    # positive LIDC images to reinforce the training split.
+    lidc_train_only: true
+
+train:
+  # The historical best run already established that this BCE + sampler +
+  # pos_weight recipe is the strongest base. The only remaining low-risk tweak
+  # is to select checkpoints on ranking quality, then tune the threshold after.
+  monitor_metric: auc
+  epochs: 6
+  early_stopping:
+    enabled: true
+    patience: 2
+    min_delta: 0.0
+    start_epoch: 1
+  output_dir: artifacts/checkpoints/r_last_b4_holdout_tune
+
+eval:
+  # Keep a neutral threshold during training; sweep it afterward on validation.
+  threshold: 0.5
+
+tracking:
+  group: last_b4_holdout_tune
