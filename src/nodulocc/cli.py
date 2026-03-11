@@ -10,6 +10,7 @@ import argparse
 import json
 
 from .config import load_config
+from .ensemble_csv import run_csv_ensemble
 from .ensemble import run_two_model_ensemble
 from .engine import evaluate, predict, train
 from .hpo import run_sweep
@@ -57,6 +58,20 @@ def _parser() -> argparse.ArgumentParser:
     p_ensemble.add_argument("--override-a", action="append", default=[])
     p_ensemble.add_argument("--override-b", action="append", default=[])
 
+    p_ensemble_csv = sub.add_parser("ensemble-csv")
+    p_ensemble_csv.add_argument("--pred-a", required=True)
+    p_ensemble_csv.add_argument("--pred-b", required=True)
+    p_ensemble_csv.add_argument("--config-ref", required=True)
+    p_ensemble_csv.add_argument("--out-dir", required=True)
+    p_ensemble_csv.add_argument("--labels-csv", required=False, default=None)
+    p_ensemble_csv.add_argument("--split", default="val", choices=["train", "val", "all"])
+    p_ensemble_csv.add_argument("--fold", type=int, required=False)
+    p_ensemble_csv.add_argument("--weight-a", type=float, default=0.5)
+    p_ensemble_csv.add_argument("--threshold-a", type=float, default=0.5)
+    p_ensemble_csv.add_argument("--threshold-b", type=float, default=0.5)
+    p_ensemble_csv.add_argument("--default-threshold", type=float, default=0.5)
+    p_ensemble_csv.add_argument("--override-ref", action="append", default=[])
+
     return p
 
 
@@ -82,6 +97,11 @@ def main() -> None:
 
     if args.command == "ensemble":
         result = run_two_model_ensemble(args)
+        print(json.dumps(result, indent=2))
+        return
+
+    if args.command == "ensemble-csv":
+        result = run_csv_ensemble(args)
         print(json.dumps(result, indent=2))
         return
 
