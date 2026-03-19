@@ -3,10 +3,8 @@ task: classification
 
 data:
   preprocessing:
-    profile: team_v2
-    team_v2:
-      use_thorax_mask: true
-      use_clahe: true
+    clahe:
+      enabled: true
 
 model:
   backbone: tf_efficientnet_b4.ns_jft_in1k
@@ -19,7 +17,3 @@ train:
 
 eval:
   threshold: 0.65
-
-tracking:
-  group: holdout_fastpass_b4_team_v2
-

@@ -4,7 +4,7 @@ task: classification
 train:
   # Keep the strongest simple setup, but select checkpoints on ranking quality.
   monitor_metric: auc
-  epochs: 8
+  epochs: 12
   early_stopping:
     enabled: true
     patience: 2

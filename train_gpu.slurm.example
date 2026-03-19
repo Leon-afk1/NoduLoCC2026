@@ -13,6 +13,7 @@ set -euo pipefail
 
 module load StdEnv/2023
 module load python/3.14.2 # example: adapt to what “module avail python” shows
+# module load gcc opencv/4.13.0 # example: uncomment if clahe preprocessing is activated, use "module spider opencv" to find the version available
 cd $SCRATCH/NoduLoCC2026
 source .venv/bin/activate
 

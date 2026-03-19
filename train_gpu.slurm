@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --account=def-zonata
 #SBATCH --job-name=nodulocc-train
-#SBATCH --time=0-6:00
+#SBATCH --time=0-10:00
 #SBATCH --gpus=a100:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=32G
@@ -13,6 +13,7 @@ set -euo pipefail
 
 module load StdEnv/2023
 module load python/3.14.2
+module load gcc opencv/4.13.0
 cd $SCRATCH/NoduLoCC2026
 source .venv/bin/activate
 
@@ -41,5 +42,17 @@ echo "Dataset staged. Starting training..."
 # ---------------------------------------------------------------
 
 cd $SCRATCH/NoduLoCC2026
-srun python -m nodulocc.cli train --config configs/r3_b4_bce_no_posw.yaml \
+srun python -m nodulocc.cli train --config configs/r1_b4_bce_posw_f.yaml \
   --override data.dataset_root="$SLURM_TMPDIR/nodulocc_dataset"
+
+#srun python -m nodulocc.cli ensemble \
+#  --config-a configs/r1_b4_bce_posw.yaml \
+#  --ckpt-a artifacts/checkpoints/r1_b4_bce_posw/classification_holdout_best.pt \
+#  --config-b configs/r1_b4_bce_posw_team_v2_no_double_comp.yaml \
+#  --ckpt-b artifacts/checkpoints/r1_b4_bce_posw_team_v2_no_double_comp/classification_holdout_best.pt \
+#  --out-dir artifacts/ensemble_b4_best \
+#  --reference a \
+#  --split val \
+#  --default-threshold 0.65 \
+#  --override-a data.classification.lidc_train_only=true \
+#  --override-a eval.threshold=0.65

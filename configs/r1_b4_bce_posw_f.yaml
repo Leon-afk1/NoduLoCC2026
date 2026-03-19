@@ -1,25 +1,18 @@
 base_config: base.yaml
 task: classification
 
-data:
-  preprocessing:
-    profile: team_v2
-    team_v2:
-      use_thorax_mask: true
-      use_clahe: true
-
 model:
   backbone: tf_efficientnet_b4.ns_jft_in1k
 
 train:
-  epochs: 12
   loss:
     name: bce
     use_pos_weight: true
+  output_dir: artifacts/checkpoints/r1_b4_bce_posw
 
 eval:
   threshold: 0.65
 
 tracking:
-  group: holdout_fastpass_b4_team_v2
+  group: holdout_fastpass_b4
 

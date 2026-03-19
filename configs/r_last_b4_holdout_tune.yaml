@@ -12,7 +12,7 @@ train:
   # pos_weight recipe is the strongest base. The only remaining low-risk tweak
   # is to select checkpoints on ranking quality, then tune the threshold after.
   monitor_metric: auc
-  epochs: 6
+  epochs: 12
   early_stopping:
     enabled: true
     patience: 2
